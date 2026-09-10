@@ -50,8 +50,6 @@ COMPONENTS: list[tuple[str, str, re.Pattern]] = [
         "mla", "sparse[ _-]?attention", "sparse", "indexer", "mqa[ _-]?logits",
         "dsa", "mhc", "swa", "yarn", "nope",
         "sparse[ _-]?mla", "attention[ _-]?metadata", "flashmla")),
-    ("moe", "🧠 MoE / 路由", _w(
-        "moe", "expert", "experts", "deepep", "router", "routing", "gemm")),
     # EP / DP / PP + PD 分离 —— 我们的主力并行形态，排在 TP/CP 前面
     # 缩写后面常直接跟并行度（TP4 / DP16 / EP8），所以每个都带 \d* ——
     # 不带的话 `_w("dp")` 匹配不上 `DP8`，这一类会整片漏掉
@@ -59,6 +57,8 @@ COMPONENTS: list[tuple[str, str, re.Pattern]] = [
         r"ep\d*", r"dp\d*", r"pp\d*", r"dcp\d*", r"pcp\d*", r"edp\d*", "dpa",
         "expert[ _-]?parallel", "data[ _-]?parallel", "pipeline[ _-]?parallel",
         "disaggregation", "disaggregated", "disagg", "pdmux", r"\d+p\d+d", "pd")),
+    ("moe", "🧠 MoE / 路由", _w(
+        "moe", "expert", "experts", "deepep", "router", "routing", "gemm")),
     ("quant", "🔢 量化", _w(
         "fp8", "fp4", "nvfp4", "mxfp4", "gptq", "autoround", "quantized",
         "quantization", "quantize", "wna16", "int8", "awq")),
