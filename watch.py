@@ -41,6 +41,7 @@ from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
+import criteria  # noqa: E402
 import page  # noqa: E402
 from analyze import key_of, triage  # noqa: E402
 from common import (COMPONENT_LABELS, COMPONENT_ORDER, card_of,  # noqa: E402
@@ -123,8 +124,8 @@ def build_card(items: list[dict], verdicts: dict, since: datetime, tz: ZoneInfo,
 
     els.append({"tag": "note", "elements": [{"tag": "lark_md", "content":
         f"{since.astimezone(tz):%m-%d %H:%M} → {now:%m-%d %H:%M} · "
-        f"P0 = 静默算错 或 崩溃/卡死/OOM/起不来 · 卡型只做标注不参与判级 · "
-        f"只收有实质进展的，机器人顶起来的不算"}]})
+        f"只收有实质进展的，机器人顶起来的不算 · "
+        f"[判定标准 {criteria.version()}]({base}#criteria)"}]})
 
     card = {"config": {"wide_screen_mode": True},
             "header": {"template": "red" if p0_total else "blue",
@@ -193,7 +194,7 @@ def main() -> None:
     for v in verdicts.values():
         lv[v["level"]] += 1
     print(f"triage: P0 {lv['P0']} / P1 {lv['P1']} / P2 {lv['P2']}"
-          f"  (ai={'on' if ai_on else 'off'})")
+          f"  (ai={'on' if ai_on else 'off'}, criteria={criteria.version()})")
     # 两处降级都不会让任务失败，只会让日报悄悄变成噪声 —— 在日志里喊出来
     if not ai_on:
         print("::warning::LLM_API_KEY 未配置，等级为规则打分，未经 AI 评估")

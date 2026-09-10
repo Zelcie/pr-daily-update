@@ -21,6 +21,7 @@ import sys
 import urllib.error
 import urllib.request
 
+import criteria
 from common import is_severe, kind_of, repo_of, summarize
 
 BASE_URL = os.environ.get("LLM_BASE_URL", "https://f7xnt9mg.fn.bytedance.net/v1")
@@ -31,51 +32,7 @@ SYSTEM = """\
 DeepSeek-V4.1 系列的在线推理，主力并行形态是 EP / DP / PP 加 PD 分离，
 默认开 CUDA Graph FULL，涉及投机解码、稀疏 MLA、KV cache、MoE 路由等路径。
 
-给每条 GitHub PR 或 issue 评一个优先级。判据是「**对我们的服务**后果是什么」——
-注意主语是我们：只在 ROCm / NPU / XPU / CPU 等我们不跑的后端上出现的故障，
-不影响我们的服务，最高只给 P1。
-
-P0 —— 影响**我们的**服务能否被**正确地 serve 起来**，两类都算，同级：
-      · 静默算错 —— 输出损坏、数值错误、精度崩坏、非确定性输出、算子结果错、
-        状态/位置/索引错位、聚合或路由算错
-      · 服务不可用 —— 崩溃、卡死、死锁、OOM、启动失败、断言失败、
-        加载或编译失败、接受率崩塌
-
-P1 —— 不影响正确性和可用性，但值得跟：
-      · 性能退化（**退化也是 P1，不是 P0**）、性能优化
-      · 功能推进、新能力、新配置支持
-
-P2 —— 文档、示例、CI、测试、重构、代码归属、日志、命名、依赖升级等杂务。
-
-三条硬规则：
-
-1. **不要因为「这条是某张 NVIDIA 卡专属」而升降级。** SM80 / SM90 / SM100 /
-   H20 / Blackwell 只是标注，不同卡型是并行推进的，A100 上起不来和 B200 上
-   起不来一样是 P0。这跟上面说的「非 NVIDIA 后端」是两回事：卡型是我们内部
-   并行推进的几条线，ROCm / NPU / XPU 则完全不在我们的技术栈里。
-2. **不要考虑这一批里有多少条 P0。** 你每次只看到全体的一小部分，按数量或
-   比例控制必然失真。后果够格就是 P0。
-3. 只有标题和正文摘要，看不到 diff。后果拿不准就往低了报。
-
-校准样例：
-
-P0  Fix DeepSeek-V4 routing: sqrtsoftplus underflow and unfloored renorm   → 数值下溢，路由权重算错
-P0  [Bug] on 2x H200: progressive output corruption under concurrency      → 输出损坏
-P0  [Spec] Budget the DFLASH/DSPARK draft KV pool by attn_tp_size          → 预算算错导致 OOM
-P0  [Fix] Key DSpark compact ragged CUDA graphs by request-slot geometry   → 首次回放非法访存崩溃
-P0  Fix/dsv4 pre sm90 sparse mla omnibus                                   → SM80 上起不来；卡型不降级
-P0  [Bugfix][Parser] Fix DeepSeek V4 tool argument streaming               → 对外接口输出错乱，等同算错
-
-P1  [ROCm] Fixing GLM-5.1, DeepSeek-V3.2, DeepSeek-V4 on gfx942 and gfx950 → 只在 AMD 上崩，我们不跑
-P1  [NPU] Support DFlash speculative decoding for MiMo-V2.5-Pro            → 昇腾专属，不影响我们
-
-P1  [Perf][DSpark] KV-only context insert and fused kv_norm                → 优化
-P1  [Perf] v0.28.0 needs ~4 GiB/GPU more non-KV memory than v0.27          → 性能/显存退化，退化是 P1
-P1  [Model] Support DeepSeek-V4.1-Flash                                    → 新能力
-P1  refactor: streamline DeepSeek V4 mHC warmup and remove token-size cap  → 重构且无故障描述
-
-P2  chore: add HiSparse coordinator and allocator code owners              → 杂务
-P2  [CI][Ascend] Add debug-only nightly perf suite                         → CI
+""" + criteria.prompt_block() + """
 
 只输出 JSON，不要解释、不要代码围栏，形状固定为：
 {"items":[{"id":"原样抄回输入里的 id","level":"P0|P1|P2","reason":"一句中文，说清后果是什么，不要复述标题"}]}

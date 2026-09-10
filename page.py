@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 import html
+
+import criteria
 from collections import defaultdict
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -15,12 +17,8 @@ from zoneinfo import ZoneInfo
 from common import (COMPONENT_LABELS, COMPONENT_ORDER, card_of, component_of,
                     repo_of, state_of, summarize)
 
-LEVELS = ["P0", "P1", "P2"]
-LEVEL_DESC = {
-    "P0": "会直接咬到线上：算错、卡死、崩溃、显存爆掉、明显退化，且落在我们跑的路径上",
-    "P1": "值得本周看：相关路径上的功能推进、有意义的优化、影响面大但不紧急的缺陷",
-    "P2": "知道就行：其他后端/其他模型专属、文档、CI、重构、小修小补",
-}
+LEVELS = [lvl for lvl, _o, _g in criteria.LEVELS]
+LEVEL_DESC = {lvl: one for lvl, one, _g in criteria.LEVELS}
 
 CSS = """
 :root{
@@ -75,6 +73,20 @@ h2 .n{color:var(--muted);font-weight:400;font-size:13px}
 .card{border:1px solid var(--line);border-radius:4px;padding:0 4px}
 .note{font-size:12px;color:var(--muted);background:var(--panel);
   border:1px solid var(--line);border-radius:8px;padding:11px 13px;margin:0 0 26px}
+.crit{background:var(--panel);border:1px solid var(--line);border-radius:9px;
+  padding:16px 18px;font-size:13px}
+.crit-lvl{margin-bottom:12px}
+.crit-lvl>b{font-size:14px;margin-right:6px}
+.crit ul,.crit ol{margin:6px 0 0;padding-left:20px}
+.crit li{border:0;padding:2px 0;margin:0;list-style:disc}
+.crit ol li{list-style:decimal}
+.crit h3{margin:20px 0 6px;color:var(--ink);font-size:13.5px}
+table.ex{border-collapse:collapse;width:100%;margin-top:6px;font-size:12px}
+table.ex td{padding:4px 8px 4px 0;vertical-align:top;
+  border-bottom:1px solid var(--line)}
+table.ex td:first-child{white-space:nowrap;width:1%}
+table.ex code{font-size:11.5px;word-break:break-word}
+.muted{color:var(--muted)}
 footer{margin-top:52px;padding-top:16px;border-top:1px solid var(--line);
   color:var(--muted);font-size:12px}
 """
@@ -113,6 +125,39 @@ def _line(it: dict, verdict: dict, tz: ZoneInfo) -> str:
     return "".join(out)
 
 
+def _md(t: str) -> str:
+    """criteria 里的 **粗体** 转成 HTML，其余转义。"""
+    parts = html.escape(t).split("**")
+    return "".join(x if i % 2 == 0 else f"<strong>{x}</strong>"
+                   for i, x in enumerate(parts))
+
+
+def _criteria_section() -> str:
+    """页尾那一栏。内容全部来自 criteria.py —— 和喂给模型的提示词同源，
+    改标准两边一起变，不会出现页面挂着旧标准、模型按新标准判的情况。"""
+    o = [f'<h2 id="criteria">优先级判断标准 '
+         f'<span class="n">· 版本 <code>{criteria.version()}</code></span></h2>',
+         '<p class="desc">下面就是喂给模型的原文，改动会让版本号变化 —— '
+         '版本不同的两天，标签不可直接对比。</p>',
+         '<div class="crit">']
+    for lvl, one_liner, groups in criteria.LEVELS:
+        o.append(f'<div class="crit-lvl"><b class="{lvl.lower()}">{lvl}</b> '
+                 f"{_md(one_liner)}<ul>")
+        for name, detail in groups:
+            o.append(f"<li><b>{_md(name)}</b> —— {_md(detail)}</li>")
+        o.append("</ul></div>")
+    o.append("<h3>硬规则</h3><ol>")
+    for title, body in criteria.RULES:
+        o.append(f"<li><b>{_md(title)}</b> —— {_md(body)}</li>")
+    o.append("</ol><h3>校准样例</h3><table class=\"ex\"><tbody>")
+    for lvl, title, why in criteria.EXAMPLES:
+        o.append(f'<tr><td><b class="{lvl.lower()}">{lvl}</b></td>'
+                 f"<td><code>{html.escape(title)}</code></td>"
+                 f'<td class="muted">{html.escape(why)}</td></tr>')
+    o.append("</tbody></table></div>")
+    return "".join(o)
+
+
 def render(items: list[dict], verdicts: dict[str, dict], since: datetime,
            tz: ZoneInfo, filtered: bool, ai_on: bool) -> str:
     from analyze import key_of
@@ -138,13 +183,10 @@ def render(items: list[dict], verdicts: dict[str, dict], since: datetime,
     if not filtered:
         notes.append("⚠️ 未做有效更新过滤（缺少 GitHub token），"
                      "列表里可能混着只被机器人顶了一下、没有实质进展的条目。")
-    notes.append("<strong>P0</strong> = 影响服务能否被正确 serve 起来"
-                 "（静默算错 或 崩溃/卡死/OOM/起不来，两类同级）；"
-                 "<strong>P1</strong> = 性能退化或优化、功能推进；"
-                 "<strong>P2</strong> = 文档/CI/重构等杂务。"
-                 "卡型只做标注，不参与判级。")
     notes.append("这是<strong>初筛</strong>：模型只看得到标题和正文摘要，看不到 diff。"
-                 "P0 的意思是「今天先看这几条」，不是「这几条一定出事」。")
+                 "P0 的意思是「今天先看这几条」，不是「这几条一定出事」。"
+                 f'完整判据见页尾的<a href="#criteria">优先级判断标准</a>'
+                 f"（版本 <code>{criteria.version()}</code>）。")
     out.append('<div class="note">' + "<br>".join(notes) + "</div>")
 
     # 目录：大类 + 各档条数，P0 数字标红
@@ -174,6 +216,7 @@ def render(items: list[dict], verdicts: dict[str, dict], since: datetime,
             out += [_line(it, verdicts.get(key_of(it), {}), tz) for it in rows]
             out.append("</ul>")
 
+    out.append(_criteria_section())
     out.append(f"<footer>由 <code>pr-daily-update</code> 每日生成 · "
                f"{now:%Y-%m-%d %H:%M %Z}</footer></div>")
     return ('<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
