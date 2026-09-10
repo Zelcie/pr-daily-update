@@ -1,6 +1,14 @@
 name: Daily PR digest
 
 on:
+  # 推代码就刷新页面 —— 只有 schedule 和 workflow_dispatch 的时候，改了分类逻辑
+  # 推上来页面也不会动，线上一直停在上次跑的那版，而且没有任何报错提示。
+  # push 触发只更新页面不发卡片（PAGE_ONLY=1 见下），免得每次提交都刷群。
+  push:
+    branches: [main]
+    paths-ignore:
+      - "README.md"
+      - "**/*.md"
   schedule:
     # 09:07 PDT / 08:07 PST。飞书文档明确提醒避开整点和半点 —— 那两个时刻
     # 全公司的定时任务一起打过来，容易撞限流。
@@ -50,7 +58,8 @@ jobs:
           LLM_MODEL: ${{ vars.LLM_MODEL || 'gpt-6-astra' }}
           PAGE_URL: ${{ vars.PAGE_URL || format('https://{0}.github.io/{1}/', github.repository_owner, github.event.repository.name) }}
           WINDOW_HOURS: ${{ inputs.window_hours || '25' }}
-          PAGE_ONLY: ${{ inputs.page_only || '0' }}
+          # push 触发时只出页面不发卡片；定时和手动触发照常发
+          PAGE_ONLY: ${{ github.event_name == 'push' && '1' || inputs.page_only || '0' }}
           REPORT_TZ: America/Los_Angeles
           OUT_DIR: site
         run: python3 watch.py

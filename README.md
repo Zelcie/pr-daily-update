@@ -98,7 +98,12 @@ LARK_WEBHOOK='https://open.larkoffice.com/open-apis/bot/v2/hook/xxx' \
 
 ## 部署
 
-`.github/workflows/daily.yml`，每天 09:07 PDT 跑一次，也可手动触发。
+`.github/workflows/daily.yml` 有三个触发器：
+
+- **push 到 main** —— 只重新生成页面，不发卡片。没有这个的话，改了分类逻辑推上来
+  页面不会动，线上一直停在上次跑的那版，而且不报任何错。踩过一次。
+- **每天 09:07 PDT** —— 出页面 + 发卡片
+- **手动触发** —— 可指定回看窗口，也可勾选只出页面
 
 **需要三处一次性配置：**
 
