@@ -32,7 +32,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"   # 只用标准库，3.9+ 都行
+          python-version: "3.12"   # 纯标准库，无第三方依赖
 
       # 一次搜索同时产出页面和卡片，免得两者对不上。卡片里的链接指向固定的
       # Pages 地址：页面一两分钟后才部署好，但链接本身早就有效。
@@ -41,7 +41,13 @@ jobs:
           LARK_WEBHOOK: ${{ secrets.LARK_WEBHOOK }}
           LARK_SECRET: ${{ secrets.LARK_SECRET }}
           LARK_KEYWORD: ${{ secrets.LARK_KEYWORD }}
-          GITHUB_TOKEN: ${{ github.token }}   # 认证后 search 额度 10→30 次/分钟
+          # 没有它 search 只有 10 次/分钟，且「有效更新」过滤会整个跳过
+          # （一轮上百个 timeline 请求，未认证 60 次/小时必然 403）
+          GITHUB_TOKEN: ${{ github.token }}
+          # 公司网关。缺失则降级成规则打分，页面顶部会标明未经 AI 评估
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_BASE_URL: ${{ vars.LLM_BASE_URL || 'https://f7xnt9mg.fn.bytedance.net/v1' }}
+          LLM_MODEL: ${{ vars.LLM_MODEL || 'gpt-6-astra' }}
           PAGE_URL: ${{ vars.PAGE_URL || format('https://{0}.github.io/{1}/', github.repository_owner, github.event.repository.name) }}
           WINDOW_HOURS: ${{ inputs.window_hours || '25' }}
           PAGE_ONLY: ${{ inputs.page_only || '0' }}

@@ -140,8 +140,9 @@ def is_v41(title: str) -> bool:
 
 # ---------------------------------------------------------------- 抓取
 
-def _search(term: str, since: str, token: str | None) -> list[dict]:
-    q = " ".join([*(f"repo:{r}" for r in REPOS), "is:pr",
+def _search(term: str, since: str, token: str | None,
+            kind: str = "pr") -> list[dict]:
+    q = " ".join([*(f"repo:{r}" for r in REPOS), f"is:{kind}",
                   f"{term} in:title", f"updated:>={since}"])
     params = urllib.parse.urlencode(
         {"q": q, "sort": "updated", "order": "desc", "per_page": "100"})
@@ -154,16 +155,69 @@ def _search(term: str, since: str, token: str | None) -> list[dict]:
         return json.load(resp).get("items", [])
 
 
-def collect(since: datetime, token: str | None) -> list[dict]:
-    """每个关键词单独搜一次再按 PR id 合并去重。"""
+def collect(since: datetime, token: str | None,
+            kind: str = "pr") -> list[dict]:
+    """每个关键词单独搜一次再按 id 合并去重。"""
     stamp = since.strftime("%Y-%m-%dT%H:%M:%SZ")
     merged: dict[int, dict] = {}
     for i, term in enumerate(SEARCH_TERMS):
         if i and not token:
             time.sleep(7)  # 未认证时只有 10 次/分钟，隔开一点免得吃 403
-        for item in _search(term, stamp, token):
+        for item in _search(term, stamp, token, kind=kind):
             merged[item["id"]] = item
     return sorted(merged.values(), key=lambda x: x["updated_at"], reverse=True)
+
+
+# ---------------------------------------------------------------- issue 筛选
+
+# issue 噪声极大，三层筛。vllm/sglang 的 issue 模板会强制打标题前缀，
+# 实测 100 条里 [Bug] 72 / [Feature] 12 / [Perf] 5 / [Usage] 3，前缀够可靠。
+
+# 只留缺陷类。Feature/RFC 是路线图不是风险，Usage 是用法提问。
+ISSUE_DEFECT = re.compile(r"^\s*\[(bug|perf|performance)\b", re.I)
+# 机器人自动标记的僵尸 issue
+ISSUE_DEAD = {"stale", "inactive"}
+# 会咬到线上的那一类：算错、卡死、崩、退化。区别于「我想要个功能」。
+ISSUE_SEVERE = re.compile(
+    r"corrupt|wrong|incorrect|non-?deterministi|mismatch|garbage|degenerate"
+    r"|hang|deadlock|stuck|crash|illegal memory|assert|segfault|oom"
+    r"|out of memory|\bnan\b|accuracy|regress|leak|fail", re.I)
+
+
+def keep_issue(item: dict) -> bool:
+    if item.get("state") != "open":
+        return False
+    if {l["name"].lower() for l in item.get("labels", [])} & ISSUE_DEAD:
+        return False
+    return bool(ISSUE_DEFECT.match(item["title"]))
+
+
+def issue_score(item: dict) -> int:
+    """高危词值 3 分，再叠热度。排序用，不是绝对严重度。"""
+    return (3 * bool(ISSUE_SEVERE.search(item["title"]))
+            + item.get("comments", 0)
+            + 2 * item.get("reactions", {}).get("total_count", 0))
+
+
+def is_severe(item: dict) -> bool:
+    return bool(ISSUE_SEVERE.search(item["title"]))
+
+
+def collect_issues(since: datetime, token: str | None) -> list[dict]:
+    """筛过的未解决缺陷类 issue，按分数降序。
+
+    窗口比 PR 长：一个还开着的缺陷，三天前报的和今天报的一样会咬人，
+    不该因为今天没人评论就从风险板上消失。
+    """
+    stamp = since.strftime("%Y-%m-%dT%H:%M:%SZ")
+    merged: dict[int, dict] = {}
+    for i, term in enumerate(SEARCH_TERMS):
+        if i and not token:
+            time.sleep(7)
+        for item in _search(term, stamp, token, kind="issue"):
+            if keep_issue(item):
+                merged[item["id"]] = item
+    return sorted(merged.values(), key=issue_score, reverse=True)
 
 
 def state_of(item: dict) -> tuple[str, str]:
@@ -225,3 +279,93 @@ def summarize(body: str | None, limit: int = 260) -> str:
         if (i := cut.rfind(sep)) > limit * 0.5:
             return cut[:i + 1].strip()
     return cut.rsplit(" ", 1)[0].strip() + " …"
+
+
+# ---------------------------------------------------------------- 有效更新
+
+# Search API 的 updated_at 被任何活动顶起来 —— 机器人评论、加个标签、点个赞
+# 都算，所以「今天有更新」里混着大量没实质进展的条目。真正的进展要看 timeline。
+MEANINGFUL_EVENTS = {
+    "committed",            # 推了新提交
+    "head_ref_force_pushed",
+    "reviewed",             # 有人 review
+    "merged", "closed", "reopened",
+    "ready_for_review", "convert_to_draft",
+    "commented",            # 人写的评论（机器人在下面过滤掉）
+    "review_requested",
+}
+# 这些账号刷的活动不算进展
+BOT_ACTORS = re.compile(r"\[bot\]$|^(github-actions|codecov|mergify|dependabot"
+                        r"|pre-commit-ci|sourcery-ai|coderabbitai)$", re.I)
+
+
+def _last_page_url(url: str, token: str | None) -> tuple[list, str | None]:
+    """取第一页，同时从 Link 头里挖出末页地址。
+
+    timeline 是按时间升序返回的，长 PR 的近期事件都在最后一页 —— 只读第一页
+    会把活跃 PR 全判成「没进展」，方向正好反了。
+    """
+    req = urllib.request.Request(url + ("&" if "?" in url else "?") + "per_page=100")
+    req.add_header("Accept", "application/vnd.github+json")
+    req.add_header("User-Agent", "dsv41-watch")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        data = json.load(resp)
+        link = resp.headers.get("Link", "")
+    m = re.search(r'<([^>]+)>;\s*rel="last"', link)
+    return data, (m.group(1) if m else None)
+
+
+def _fetch_timeline(item: dict, token: str | None) -> list:
+    try:
+        events, last = _last_page_url(item["timeline_url"], token)
+        if last:
+            events2, _ = _last_page_url(last, token)
+            return events2
+        return events
+    except Exception:
+        return []      # 单条失败不该拖垮整轮，退化成「按 updated_at 算有更新」
+
+
+def effective_events(item: dict, since: datetime, token: str | None) -> list[str]:
+    """窗口内发生过的实质事件类型。空列表 = 只是被顶了一下。"""
+    out = []
+    for ev in _fetch_timeline(item, token):
+        kind = ev.get("event")
+        if kind not in MEANINGFUL_EVENTS:
+            continue
+        ts = (ev.get("created_at") or ev.get("committer", {}).get("date")
+              or (ev.get("commit_id") and ev.get("author", {}).get("date")))
+        if not ts:
+            continue
+        try:
+            when = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if when < since:
+            continue
+        actor = (ev.get("actor") or {}).get("login") or ""
+        if actor and BOT_ACTORS.search(actor):
+            continue
+        out.append(kind)
+    return out
+
+
+def filter_effective(items: list[dict], since: datetime,
+                     token: str | None, workers: int = 8) -> list[dict]:
+    """只留窗口内有实质进展的。没 token 就不做 —— 未认证 60 次/小时，
+    一轮上百个 timeline 请求必然 403，宁可不筛也别筛出个空列表。"""
+    if not token:
+        for it in items:
+            it["_events"] = []
+        return items
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        evs = list(pool.map(lambda i: effective_events(i, since, token), items))
+    kept = []
+    for it, ev in zip(items, evs):
+        it["_events"] = ev
+        if ev:
+            kept.append(it)
+    return kept

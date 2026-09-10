@@ -1,26 +1,27 @@
 #!/usr/bin/env python3
-"""每日把 vLLM / SGLang 上跟 DeepSeek-V4.1 有关的 PR 动态推到飞书群。
+"""每天把 vLLM / SGLang 上跟 DeepSeek-V4.1 有关的进展推到飞书群。
 
-产出两样东西：
-  1. site/index.html —— 组件 × 类型的全量明细页，每条 PR 带链接和摘要
-  2. 一张飞书卡片 —— 只放矩阵，每个数字链到页面对应锚点
+产出两样：
+  1. site/index.html —— 按 P0/P1/P2 分组的朴素链接列表，每条带 AI 评级理由
+  2. 一张飞书卡片 —— P0 全列（加粗），P1 列标题，P2 只给数
 
-无状态：只查「最近 WINDOW_HOURS 小时内有更新」的 PR，不需要 state 文件或 cache，
-重跑幂等。连续几天在迭代的 PR 会连续出现 —— 这是特性，说明它还在动。
+三道处理：抓 → 只留窗口内有实质进展的 → 交给 Claude 评 P0/P1/P2。
 
 环境变量:
-  LARK_WEBHOOK      发卡片时必填；只生成页面（PAGE_ONLY=1）时不需要
-  LARK_SECRET       群里开了「签名校验」就必填
-  LARK_KEYWORD      群里开了「自定义关键词」就必填，这个词会被织进卡片正文；
-                    不填而群里又开了关键词，飞书会以 19024 Key Words Not Found 拒收
-  GITHUB_TOKEN      强烈建议，未认证的 search API 只有 10 次/分钟
-  PAGE_URL          明细页地址，卡片里的锚点链接以此为前缀
-  WINDOW_HOURS      回看窗口，默认 25（比 24 多 1 小时，避免 cron 抖动漏掉）
-  REPORT_TZ         展示时区，默认 America/Los_Angeles
-  OUT_DIR           页面输出目录，默认 site
-  SEND_WHEN_EMPTY   一条都没有时是否照发，默认 0
-  PAGE_ONLY         1 = 只生成页面不发卡片
-  DRY_RUN           1 = 生成页面并打印卡片 JSON，但不发送
+  LARK_WEBHOOK       发卡片时必填
+  LARK_SECRET        群里开了「签名校验」就必填
+  LARK_KEYWORD       群里开了「自定义关键词」就必填
+  GITHUB_TOKEN       强烈建议。没有它 search 只有 10 次/分钟，
+                     且有效更新过滤会整个跳过（timeline 请求打不动）
+  LLM_API_KEY        公司网关的 key。没有就降级成规则打分，页面上会标明未经评估
+  LLM_BASE_URL       默认 https://f7xnt9mg.fn.bytedance.net/v1
+  LLM_MODEL          默认 gpt-6-astra
+  PAGE_URL           明细页地址
+  WINDOW_HOURS       回看窗口，默认 25（比 24 多 1 小时，避免 cron 抖动漏掉）
+  REPORT_TZ          展示时区，默认 America/Los_Angeles
+  OUT_DIR            页面输出目录，默认 site
+  SEND_WHEN_EMPTY    一条都没有时是否照发，默认 0
+  PAGE_ONLY / DRY_RUN / NO_AI   只出页面 / 不发送 / 跳过 AI
 """
 
 from __future__ import annotations
@@ -34,17 +35,19 @@ import pathlib
 import sys
 import time
 import urllib.request
-from collections import Counter, defaultdict
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
 import page  # noqa: E402
-from common import (COMPONENT_LABELS, COMPONENT_ORDER, KIND_LABELS,  # noqa: E402
-                    KIND_ORDER, collect, component_of, is_v41, kind_of)
+from analyze import key_of, triage  # noqa: E402
+from common import (collect, filter_effective,  # noqa: E402
+                    keep_issue, state_of)
 
 DEFAULT_PAGE = "https://zelcie.github.io/pr-daily-update/"
+CARD_P1_CAP = 12
 
 
 def _get(name: str) -> str:
@@ -54,45 +57,60 @@ def _get(name: str) -> str:
     return v
 
 
-def build_card(items: list[dict], since: datetime, tz: ZoneInfo,
-               page_url: str, keyword: str | None = None) -> dict:
-    grid: dict[str, Counter] = defaultdict(Counter)
+def build_card(items: list[dict], verdicts: dict, since: datetime, tz: ZoneInfo,
+               page_url: str, ai_on: bool, keyword: str | None = None) -> dict:
+    buckets = defaultdict(list)
     for it in items:
-        grid[component_of(it["title"])][kind_of(it["title"])] += 1
-
+        buckets[verdicts.get(key_of(it), {}).get("level", "P2")].append(it)
     now = datetime.now(tz)
-    v41 = sum(1 for i in items if is_v41(i["title"]))
     base = page_url.rstrip("/") + "/"
-    # 关键词校验只扫 elements，不扫 header —— 早期版本正文里铺着 PR 标题、
-    # 自带关键词，改成纯矩阵后就撞上了 19024，所以这里显式织一遍。
-    lead = f"共 **{len(items)}** 条，其中标题直指 V4.1 **{v41}** 条 · [看全部明细]({base})"
+
+    lead = (f"DeepSeek-V4.1 上游今日 **{len(items)}** 条实质进展 · "
+            f"**P0 {len(buckets['P0'])}** · P1 {len(buckets['P1'])} · "
+            f"P2 {len(buckets['P2'])} · [看全部]({base})")
     if keyword and keyword.lower() not in lead.lower():
         lead = f"{keyword} · {lead}"
-    els: list[dict] = [{"tag": "div", "text": {"tag": "lark_md", "content": lead}},
-                       {"tag": "hr"}]
-
-    for c in COMPONENT_ORDER:
-        row = grid.get(c)
-        if not row:
-            continue
-        # 每个数字都是链接，点进去落到明细页对应小节
-        cells = [f"[{KIND_LABELS[k]} {row[k]}]({base}#{c}-{k})"
-                 for k in KIND_ORDER if row[k]]
+    els: list[dict] = [{"tag": "div", "text": {"tag": "lark_md", "content": lead}}]
+    if not ai_on:
         els.append({"tag": "div", "text": {"tag": "lark_md", "content":
-            f"**{COMPONENT_LABELS[c]}** [{sum(row.values())} 条]({base}#{c})\n"
-            f"{' · '.join(cells)}"}})
+            "<font color='grey'>⚠️ 等级为规则打分，未经 AI 评估</font>"}})
 
-    els.append({"tag": "hr"})
+    if buckets["P0"]:
+        els.append({"tag": "hr"})
+        els.append({"tag": "div", "text": {"tag": "lark_md",
+                    "content": f"**🔴 P0 · {len(buckets['P0'])} 条**"}})
+        for it in buckets["P0"]:
+            v = verdicts.get(key_of(it), {})
+            _, st = state_of(it)
+            tag = "🐞 " if "pull_request" not in it else ""
+            els.append({"tag": "div", "text": {"tag": "lark_md", "content":
+                f"**{tag}[{it['title']}]({it['html_url']})**\n"
+                f"<font color='grey'>{v.get('reason', '')} · {st}</font>"}})
+
+    if buckets["P1"]:
+        els.append({"tag": "hr"})
+        rows = [f"· [{i['title']}]({i['html_url']})"
+                for i in buckets["P1"][:CARD_P1_CAP]]
+        more = len(buckets["P1"]) - CARD_P1_CAP
+        if more > 0:
+            rows.append(f"<font color='grey'>…另有 {more} 条，[看全部]({base}#p1)</font>")
+        els.append({"tag": "div", "text": {"tag": "lark_md", "content":
+            f"**🟠 P1 · {len(buckets['P1'])} 条**\n" + "\n".join(rows)}})
+
+    if buckets["P2"]:
+        els.append({"tag": "div", "text": {"tag": "lark_md", "content":
+            f"⚪ P2 **{len(buckets['P2'])}** 条，[在明细页查看]({base}#p2)"}})
+
     els.append({"tag": "note", "elements": [{"tag": "lark_md", "content":
-        f"窗口 {since.astimezone(tz):%m-%d %H:%M} → {now:%m-%d %H:%M} · "
-        f"组件和类型都取第一个命中的分类"}]})
+        f"{since.astimezone(tz):%m-%d %H:%M} → {now:%m-%d %H:%M} · "
+        f"只收有实质进展的（新提交/review/合并/关闭/讨论），"
+        f"机器人顶起来的不算 · 等级为初筛"}]})
 
-    return {
-        "config": {"wide_screen_mode": True},
-        "header": {"template": "blue", "title": {"tag": "plain_text",
-                   "content": f"DeepSeek-V4.1 · vLLM / SGLang 日报 {now:%m-%d}"}},
-        "elements": els,
-    }
+    return {"config": {"wide_screen_mode": True},
+            "header": {"template": "red" if buckets["P0"] else "blue",
+                       "title": {"tag": "plain_text",
+                                 "content": f"DeepSeek-V4.1 上游日报 {now:%m-%d}"}},
+            "elements": els}
 
 
 def post(webhook: str, secret: str | None, card: dict) -> None:
@@ -102,7 +120,6 @@ def post(webhook: str, secret: str | None, card: dict) -> None:
         # 飞书签名很反直觉：待签名串当 key，被签名的消息体是空的。
         digest = hmac.new(f"{ts}\n{secret}".encode(), b"", hashlib.sha256).digest()
         body["timestamp"], body["sign"] = ts, base64.b64encode(digest).decode()
-
     raw = json.dumps(body, ensure_ascii=False).encode()
     if len(raw) > 20 * 1024:
         sys.exit(f"card body {len(raw)}B exceeds the 20KB webhook limit")
@@ -121,31 +138,50 @@ def main() -> None:
     webhook = "" if (dry or page_only) else _get("LARK_WEBHOOK")
     tz = ZoneInfo(os.environ.get("REPORT_TZ", "America/Los_Angeles"))
     page_url = os.environ.get("PAGE_URL", DEFAULT_PAGE)
+    token = os.environ.get("GITHUB_TOKEN")
     since = datetime.now(timezone.utc) - timedelta(
         hours=float(os.environ.get("WINDOW_HOURS", "25")))
 
-    items = collect(since, os.environ.get("GITHUB_TOKEN"))
-    dist = Counter(f"{component_of(i['title'])}/{kind_of(i['title'])}" for i in items)
-    print(f"{len(items)} PRs in window, "
-          f"{sum(1 for i in items if is_v41(i['title']))} match V4.1")
-    print(f"  top cells: {dist.most_common(6)}")
+    prs = collect(since, token)
+    # issue 用同一个窗口：这里要的是「今天动了什么」，不是长期风险板
+    issues = [i for i in collect(since, token, kind="issue") if keep_issue(i)]
+    raw = prs + issues
+    items = filter_effective(raw, since, token)
+    filtered = bool(token)
+    print(f"{len(raw)} touched → {len(items)} with real progress"
+          f" ({len(prs)} PRs / {len(issues)} issues before filter)"
+          + ("" if filtered else "  [未过滤：无 GITHUB_TOKEN]"))
+
+    ai_on = False
+    verdicts: dict[str, dict] = {}
+    if items and os.environ.get("NO_AI") != "1":
+        verdicts = triage(items)
+        ai_on = any(v.get("ai") for v in verdicts.values())
+    elif items:
+        from analyze import _fallback
+        verdicts = _fallback(items)
+    lv = defaultdict(int)
+    for v in verdicts.values():
+        lv[v["level"]] += 1
+    print(f"triage: P0 {lv['P0']} / P1 {lv['P1']} / P2 {lv['P2']}"
+          f"  (ai={'on' if ai_on else 'off'})")
 
     out_dir = pathlib.Path(os.environ.get("OUT_DIR", "site"))
     out_dir.mkdir(parents=True, exist_ok=True)
     target = out_dir / "index.html"
-    target.write_text(page.render(items, since, tz), encoding="utf-8")
+    target.write_text(page.render(items, verdicts, since, tz, filtered, ai_on),
+                      encoding="utf-8")
     print(f"page written: {target} ({target.stat().st_size}B)")
 
     if page_only:
         return
     if not items and os.environ.get("SEND_WHEN_EMPTY", "0") != "1":
-        print("nothing in window, skipping card")
+        print("nothing with real progress, skipping card")
         return
-
-    card = build_card(items, since, tz, page_url,
+    card = build_card(items, verdicts, since, tz, page_url, ai_on,
                       os.environ.get("LARK_KEYWORD") or None)
     if dry:
-        print(json.dumps(card, ensure_ascii=False, indent=2))
+        print(json.dumps(card, ensure_ascii=False, indent=2)[:3000])
         return
     post(webhook, os.environ.get("LARK_SECRET") or None, card)
 
