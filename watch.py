@@ -194,6 +194,11 @@ def main() -> None:
         lv[v["level"]] += 1
     print(f"triage: P0 {lv['P0']} / P1 {lv['P1']} / P2 {lv['P2']}"
           f"  (ai={'on' if ai_on else 'off'})")
+    # 两处降级都不会让任务失败，只会让日报悄悄变成噪声 —— 在日志里喊出来
+    if not ai_on:
+        print("::warning::LLM_API_KEY 未配置，等级为规则打分，未经 AI 评估")
+    if not filtered:
+        print("::warning::GITHUB_TOKEN 未配置，未做有效更新过滤")
 
     out_dir = pathlib.Path(os.environ.get("OUT_DIR", "site"))
     out_dir.mkdir(parents=True, exist_ok=True)

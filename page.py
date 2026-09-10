@@ -132,8 +132,9 @@ def render(items: list[dict], verdicts: dict[str, dict], since: datetime,
 
     notes = []
     if not ai_on:
-        notes.append("⚠️ <strong>本页等级是规则打分，未经 AI 评估</strong>"
-                     "（缺少 Anthropic 凭据）。")
+        notes.append("⚠️ <strong>本页等级是规则打分，未经 AI 评估</strong> —— "
+                     "仓库没配 <code>LLM_API_KEY</code>，"
+                     "P0/P1/P2 只是按标题关键词粗判，不可当真。")
     if not filtered:
         notes.append("⚠️ 未做有效更新过滤（缺少 GitHub token），"
                      "列表里可能混着只被机器人顶了一下、没有实质进展的条目。")
