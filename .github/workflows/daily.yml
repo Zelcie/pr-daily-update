@@ -1,0 +1,65 @@
+name: Daily PR digest
+
+on:
+  schedule:
+    # 09:07 PDT / 08:07 PST。飞书文档明确提醒避开整点和半点 —— 那两个时刻
+    # 全公司的定时任务一起打过来，容易撞限流。
+    - cron: "7 16 * * *"
+  workflow_dispatch:
+    inputs:
+      window_hours:
+        description: "回看窗口（小时）"
+        required: false
+        default: "25"
+      page_only:
+        description: "只更新页面，不发卡片（1/0）"
+        required: false
+        default: "0"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: daily-digest
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"   # 只用标准库，3.9+ 都行
+
+      # 一次搜索同时产出页面和卡片，免得两者对不上。卡片里的链接指向固定的
+      # Pages 地址：页面一两分钟后才部署好，但链接本身早就有效。
+      - name: Build page and send card
+        env:
+          LARK_WEBHOOK: ${{ secrets.LARK_WEBHOOK }}
+          LARK_SECRET: ${{ secrets.LARK_SECRET }}
+          LARK_KEYWORD: ${{ secrets.LARK_KEYWORD }}
+          GITHUB_TOKEN: ${{ github.token }}   # 认证后 search 额度 10→30 次/分钟
+          PAGE_URL: ${{ vars.PAGE_URL || format('https://{0}.github.io/{1}/', github.repository_owner, github.event.repository.name) }}
+          WINDOW_HOURS: ${{ inputs.window_hours || '25' }}
+          PAGE_ONLY: ${{ inputs.page_only || '0' }}
+          REPORT_TZ: America/Los_Angeles
+          OUT_DIR: site
+        run: python3 watch.py
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
