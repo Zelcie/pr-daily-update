@@ -30,11 +30,14 @@ def _w(*alts: str) -> re.Pattern:
     return re.compile(r"(?<![a-z0-9])(?:" + "|".join(alts) + r")(?![a-z0-9])", re.I)
 
 
-# 顺序即优先级，第一个命中的赢。一条 PR 只归一个组件，否则矩阵会重复计数。
-# 越具体的排越前：KV Cache 在稀疏注意力前面，因为 `Fix HiSparse slot translation
-# in the fused MLA KV writer` 主体是 HiSparse 不是 MLA；「模型接入」几乎垫底，
-# 因为 [Model] 标签太常见，放前面会把所有东西吸走。
+# 顺序即优先级，第一个命中的赢。一条 PR 只归一个大类。
+# 排序按暴露面：EP / DP / PP 相关的排前面，TP / CP 靠后 —— 这只影响页面上
+# 大类的先后，不影响 P0/P1/P2 的判定，那个只看「能不能正确 serve 起来」。
+# 非 NVIDIA 后端单独成类沉底：不是说它们不重要，是我们不跑。
 COMPONENTS: list[tuple[str, str, re.Pattern]] = [
+    ("otherhw", "🔌 非 NVIDIA 后端", _w(
+        "rocm", "amd", "npu", "ascend", "cann", "xpu", "tpu", "hpu", "gaudi",
+        "gfx\\d+", "maca", "intel", "cpu")),
     ("engram", "🧬 Engram", _w("engram")),
     ("spec", "🚀 投机解码", _w(
         "dspark", "dflash", "spec", "speculative", "mtp", "eagle",
@@ -45,28 +48,51 @@ COMPONENTS: list[tuple[str, str, re.Pattern]] = [
         "prefix[ _-]?cache", "kv[ _-]?writer", "unified_kv", "kv")),
     ("mla", "🎯 稀疏注意力 / MLA", _w(
         "mla", "sparse[ _-]?attention", "sparse", "indexer", "mqa[ _-]?logits",
-        "dsa", "mhc", "swa", "yarn", "nope", "attention")),
+        "dsa", "mhc", "swa", "yarn", "nope",
+        "sparse[ _-]?mla", "attention[ _-]?metadata", "flashmla")),
     ("moe", "🧠 MoE / 路由", _w(
         "moe", "expert", "experts", "deepep", "router", "routing", "gemm")),
+    # EP / DP / PP + PD 分离 —— 我们的主力并行形态，排在 TP/CP 前面
+    # 缩写后面常直接跟并行度（TP4 / DP16 / EP8），所以每个都带 \d* ——
+    # 不带的话 `_w("dp")` 匹配不上 `DP8`，这一类会整片漏掉
+    ("edp", "🔀 EP / DP / PP · PD 分离", _w(
+        r"ep\d*", r"dp\d*", r"pp\d*", r"dcp\d*", r"pcp\d*", r"edp\d*", "dpa",
+        "expert[ _-]?parallel", "data[ _-]?parallel", "pipeline[ _-]?parallel",
+        "disaggregation", "disaggregated", "disagg", "pdmux", r"\d+p\d+d", "pd")),
     ("quant", "🔢 量化", _w(
         "fp8", "fp4", "nvfp4", "mxfp4", "gptq", "autoround", "quantized",
         "quantization", "quantize", "wna16", "int8", "awq")),
-    ("parallel", "🔀 并行 / PD 分离", _w(
-        "pp", "dp", "tp", "pcp", "dcp", "ep", "pipeline[ _-]?parallel",
-        "sequence[ _-]?parallel", "tensor[ _-]?parallel", "data[ _-]?parallel",
-        "disaggregation", "disaggregated", "disagg", "pdmux", r"\d+p\d+d", "pd")),
+    ("kernel", "⚙️ Kernel / 融合", _w(
+        "kernel", "kernels", "triton", "cutlass", "fusion", "fusions", "fused",
+        "csa", "aiter", "sgl[ _-]?kernel", "cuda[ _-]?graph", "cudagraph")),
+    # TP / CP / SP —— 暴露面较低，沉到 EP/DP/PP 后面
+    ("tcp", "🔗 TP / CP / SP 并行", _w(
+        r"tp\d*", r"cp\d*", r"sp\d*", "tensor[ _-]?parallel",
+        "context[ _-]?parallel", "sequence[ _-]?parallel")),
     ("frontend", "🗣 前端 / 解析", _w(
         "parser", "parse", "parsing", "tool[ _-]?call", "tool", "chat",
         "encoder", "frontend", "renderer", "structural[ _-]?tag", "reasoning",
-        "tokenizer", "dsml", "responses", "streaming", "api", "router")),
-    ("kernel", "⚙️ Kernel / 融合", _w(
-        "kernel", "kernels", "triton", "cutlass", "fusion", "fusions", "fused",
-        "csa", "aiter", "sgl[ _-]?kernel", "cuda[ _-]?graph")),
+        "tokenizer", "dsml", "responses", "streaming", "api")),
     ("model", "🧱 模型接入", _w(
         "model", "models", "checkpoint", "checkpoints", "multimodal", "vision",
         "definitions", "backend")),
 ]
 COMPONENT_FALLBACK = ("misc", "📦 其他")
+
+# 卡型只做标注，不参与优先级 —— 不同卡型是并行推进的，SM80 上起不来和 SM100 上
+# 起不来同样是缺陷，不该因为「我们主力不是那张卡」就降级。
+CARDS: list[tuple[str, re.Pattern]] = [
+    ("Blackwell/SM100", _w("blackwell", "sm100", "sm10x", "b200", "gb200", "b300")),
+    ("Hopper/SM90", _w("hopper", "sm90", "sm9x", "h100", "h200", "h20", "h800")),
+    ("Ada/SM89", _w("ada", "sm89", "l40", "l40s", "rtx")),
+    ("Ampere/SM80", _w("ampere", "sm80", "sm86", "a100", "a800", "pre[ _-]?sm90")),
+    ("SM120", _w("sm120", "sm12x")),
+]
+
+
+def card_of(title: str) -> str:
+    hits = [name for name, pat in CARDS if pat.search(title)]
+    return " / ".join(hits[:2])
 
 
 def component_of(title: str) -> str:

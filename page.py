@@ -1,7 +1,8 @@
-"""把 PR / issue 渲染成一页朴素的链接列表，按 P0 / P1 / P2 分组。
+"""把 PR / issue 渲染成一页朴素的链接列表：先按大类分，再在大类下按 P0/P1/P2 分。
 
-刻意不做矩阵、不做二级分组 —— 这页的作用是「今天该看哪几条」，
-一眼扫完比结构漂亮重要。组件和类型退化成行内的小标签，信息不丢但不占版面。
+大类的先后按暴露面排 —— EP/DP/PP 相关的靠前，TP/CP 靠后，非 NVIDIA 后端沉底。
+这只影响阅读顺序，不影响判级：判级只看后果（能不能被正确 serve 起来）。
+卡型（SM80/SM90/SM100…）只做行内标注，同样不参与判级 —— 不同卡型是并行推进的。
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ from collections import defaultdict
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from common import (COMPONENT_LABELS, component_of, is_severe, kind_of,
+from common import (COMPONENT_LABELS, COMPONENT_ORDER, card_of, component_of,
                     repo_of, state_of, summarize)
 
 LEVELS = ["P0", "P1", "P2"]
@@ -61,6 +62,17 @@ li.p0 a.t{font-weight:700}
 .why.ai::before{content:"AI ";font-size:10px;letter-spacing:.06em;
   color:var(--accent);font-weight:600}
 .ev{font-size:11px;color:var(--muted)}
+.toc{display:flex;flex-wrap:wrap;gap:7px;margin:0 0 8px}
+.toc a{display:flex;align-items:baseline;gap:7px;font-size:12.5px;
+  text-decoration:none;color:var(--ink);background:var(--panel);
+  border:1px solid var(--line);border-radius:7px;padding:5px 10px}
+.toc a:hover{border-color:var(--accent)}
+.toc .c{font-size:11px;font-weight:400}
+.toc b{font-weight:600;margin-left:4px}
+b.p0,h3.p0{color:var(--p0)} b.p1,h3.p1{color:var(--p1)} b.p2,h3.p2{color:var(--p2)}
+h3{font-size:13px;margin:16px 0 7px;font-weight:700;letter-spacing:.02em}
+h2 .n{color:var(--muted);font-weight:400;font-size:13px}
+.card{border:1px solid var(--line);border-radius:4px;padding:0 4px}
 .note{font-size:12px;color:var(--muted);background:var(--panel);
   border:1px solid var(--line);border-radius:8px;padding:11px 13px;margin:0 0 26px}
 footer{margin-top:52px;padding-top:16px;border-top:1px solid var(--line);
@@ -104,9 +116,12 @@ def _line(it: dict, verdict: dict, tz: ZoneInfo) -> str:
 def render(items: list[dict], verdicts: dict[str, dict], since: datetime,
            tz: ZoneInfo, filtered: bool, ai_on: bool) -> str:
     from analyze import key_of
+    grid: dict[str, dict[str, list[dict]]] = defaultdict(lambda: defaultdict(list))
     buckets: dict[str, list[dict]] = defaultdict(list)
     for it in items:
-        buckets[verdicts.get(key_of(it), {}).get("level", "P2")].append(it)
+        lvl = verdicts.get(key_of(it), {}).get("level", "P2")
+        grid[component_of(it["title"])][lvl].append(it)
+        buckets[lvl].append(it)
 
     now = datetime.now(tz)
     out = ['<div class="wrap">',
@@ -122,20 +137,41 @@ def render(items: list[dict], verdicts: dict[str, dict], since: datetime,
     if not filtered:
         notes.append("⚠️ 未做有效更新过滤（缺少 GitHub token），"
                      "列表里可能混着只被机器人顶了一下、没有实质进展的条目。")
-    notes.append("P0/P1/P2 是<strong>初筛</strong>：模型只看得到标题和正文摘要，"
-                 "看不到 diff，也不知道我们线上跑的是哪个配置。"
+    notes.append("<strong>P0</strong> = 影响服务能否被正确 serve 起来"
+                 "（静默算错 或 崩溃/卡死/OOM/起不来，两类同级）；"
+                 "<strong>P1</strong> = 性能退化或优化、功能推进；"
+                 "<strong>P2</strong> = 文档/CI/重构等杂务。"
+                 "卡型只做标注，不参与判级。")
+    notes.append("这是<strong>初筛</strong>：模型只看得到标题和正文摘要，看不到 diff。"
                  "P0 的意思是「今天先看这几条」，不是「这几条一定出事」。")
     out.append('<div class="note">' + "<br>".join(notes) + "</div>")
 
-    for lvl in LEVELS:
-        rows = buckets[lvl]
-        if not rows:
+    # 目录：大类 + 各档条数，P0 数字标红
+    out.append('<div class="toc">')
+    for c in COMPONENT_ORDER:
+        if not grid[c]:
             continue
-        out.append(f'<h2 id="{lvl.lower()}">{lvl} <span class="n">· '
-                   f"{len(rows)} 条</span></h2>")
-        out.append(f'<p class="desc">{LEVEL_DESC[lvl]}</p><ul>')
-        out += [_line(it, verdicts.get(key_of(it), {}), tz) for it in rows]
-        out.append("</ul>")
+        n = {l: len(grid[c][l]) for l in LEVELS}
+        cnt = " ".join(f'<b class="{l.lower()}">{l} {n[l]}</b>' for l in LEVELS if n[l])
+        out.append(f'<a href="#{c}">{html.escape(COMPONENT_LABELS[c])}'
+                   f'<span class="c">{cnt}</span></a>')
+    out.append("</div>")
+
+    for c in COMPONENT_ORDER:
+        if not grid[c]:
+            continue
+        total = sum(len(grid[c][l]) for l in LEVELS)
+        out.append(f'<h2 id="{c}">{html.escape(COMPONENT_LABELS[c])} '
+                   f'<span class="n">· {total} 条</span></h2>')
+        for lvl in LEVELS:
+            rows = grid[c][lvl]
+            if not rows:
+                continue
+            out.append(f'<h3 id="{c}-{lvl.lower()}" class="{lvl.lower()}">{lvl} '
+                       f'<span class="n">· {len(rows)} 条</span></h3>')
+            out.append("<ul>")
+            out += [_line(it, verdicts.get(key_of(it), {}), tz) for it in rows]
+            out.append("</ul>")
 
     out.append(f"<footer>由 <code>pr-daily-update</code> 每日生成 · "
                f"{now:%Y-%m-%d %H:%M %Z}</footer></div>")

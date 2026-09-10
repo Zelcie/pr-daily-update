@@ -43,11 +43,14 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
 import page  # noqa: E402
 from analyze import key_of, triage  # noqa: E402
-from common import (collect, filter_effective,  # noqa: E402
-                    keep_issue, state_of)
+from common import (COMPONENT_LABELS, COMPONENT_ORDER, card_of,  # noqa: E402
+                    collect, component_of, filter_effective, keep_issue,
+                    state_of)
 
 DEFAULT_PAGE = "https://zelcie.github.io/pr-daily-update/"
-CARD_P1_CAP = 12
+CARD_P0_CAP = 20      # 单次卡片最多列这么多 P0，其余给个跳转
+CARD_LIMIT = 20 * 1024
+CARD_SOFT = 18 * 1024  # 逼近上限就先砍理由，别等 post() 里硬退出
 
 
 def _get(name: str) -> str:
@@ -59,15 +62,17 @@ def _get(name: str) -> str:
 
 def build_card(items: list[dict], verdicts: dict, since: datetime, tz: ZoneInfo,
                page_url: str, ai_on: bool, keyword: str | None = None) -> dict:
-    buckets = defaultdict(list)
+    """卡片跟页面同构：先大类、类内再分档。P0 全列且加粗，P1/P2 只给数。"""
+    grid: dict[str, dict[str, list[dict]]] = defaultdict(lambda: defaultdict(list))
     for it in items:
-        buckets[verdicts.get(key_of(it), {}).get("level", "P2")].append(it)
+        lvl = verdicts.get(key_of(it), {}).get("level", "P2")
+        grid[component_of(it["title"])][lvl].append(it)
+    p0_total = sum(len(grid[c]["P0"]) for c in grid)
     now = datetime.now(tz)
     base = page_url.rstrip("/") + "/"
 
-    lead = (f"DeepSeek-V4.1 上游今日 **{len(items)}** 条实质进展 · "
-            f"**P0 {len(buckets['P0'])}** · P1 {len(buckets['P1'])} · "
-            f"P2 {len(buckets['P2'])} · [看全部]({base})")
+    lead = (f"DeepSeek-V4.1 上游今日 **{len(items)}** 条 · "
+            f"**P0 {p0_total}** · [看全部]({base})")
     if keyword and keyword.lower() not in lead.lower():
         lead = f"{keyword} · {lead}"
     els: list[dict] = [{"tag": "div", "text": {"tag": "lark_md", "content": lead}}]
@@ -75,42 +80,66 @@ def build_card(items: list[dict], verdicts: dict, since: datetime, tz: ZoneInfo,
         els.append({"tag": "div", "text": {"tag": "lark_md", "content":
             "<font color='grey'>⚠️ 等级为规则打分，未经 AI 评估</font>"}})
 
-    if buckets["P0"]:
+    # P0 按大类分段列出。判级松紧会波动，P0 一多卡片就会超 20KB 被飞书拒收 ——
+    # 那天就一条都发不出去，所以这里必须有硬上限，不能赌「P0 应该不多」。
+    shown = 0
+    for c in COMPONENT_ORDER:
+        p0 = grid[c]["P0"]
+        if not p0 or shown >= CARD_P0_CAP:
+            continue
+        take = p0[:CARD_P0_CAP - shown]
+        shown += len(take)
         els.append({"tag": "hr"})
-        els.append({"tag": "div", "text": {"tag": "lark_md",
-                    "content": f"**🔴 P0 · {len(buckets['P0'])} 条**"}})
-        for it in buckets["P0"]:
+        els.append({"tag": "div", "text": {"tag": "lark_md", "content":
+            f"**{COMPONENT_LABELS[c]}** · P0 {len(p0)} 条"
+            + (f"（列出 {len(take)} 条）" if len(take) < len(p0) else "")}})
+        for it in take:
             v = verdicts.get(key_of(it), {})
             _, st = state_of(it)
-            tag = "🐞 " if "pull_request" not in it else ""
+            card = card_of(it["title"])
+            meta = " · ".join(x for x in (st, card) if x)
             els.append({"tag": "div", "text": {"tag": "lark_md", "content":
-                f"**{tag}[{it['title']}]({it['html_url']})**\n"
-                f"<font color='grey'>{v.get('reason', '')} · {st}</font>"}})
+                f"**{'🐞 ' if 'pull_request' not in it else ''}"
+                f"[{it['title']}]({it['html_url']})**\n"
+                f"<font color='grey'>{v.get('reason', '')} · {meta}</font>"}})
+    if p0_total > shown:
+        els.append({"tag": "div", "text": {"tag": "lark_md", "content":
+            f"<font color='grey'>…还有 {p0_total - shown} 条 P0 未列出，"
+            f"[在明细页查看]({base})</font>"}})
 
-    if buckets["P1"]:
+    # P1 / P2 只给每个大类的条数，点进去看
+    rest = []
+    for c in COMPONENT_ORDER:
+        n1, n2 = len(grid[c]["P1"]), len(grid[c]["P2"])
+        if n1 or n2:
+            parts = " ".join(filter(None, [
+                f"[P1 {n1}]({base}#{c}-p1)" if n1 else "",
+                f"[P2 {n2}]({base}#{c}-p2)" if n2 else ""]))
+            rest.append(f"{COMPONENT_LABELS[c]} {parts}")
+    if rest:
         els.append({"tag": "hr"})
-        rows = [f"· [{i['title']}]({i['html_url']})"
-                for i in buckets["P1"][:CARD_P1_CAP]]
-        more = len(buckets["P1"]) - CARD_P1_CAP
-        if more > 0:
-            rows.append(f"<font color='grey'>…另有 {more} 条，[看全部]({base}#p1)</font>")
-        els.append({"tag": "div", "text": {"tag": "lark_md", "content":
-            f"**🟠 P1 · {len(buckets['P1'])} 条**\n" + "\n".join(rows)}})
-
-    if buckets["P2"]:
-        els.append({"tag": "div", "text": {"tag": "lark_md", "content":
-            f"⚪ P2 **{len(buckets['P2'])}** 条，[在明细页查看]({base}#p2)"}})
+        els.append({"tag": "div", "text": {"tag": "lark_md",
+                    "content": "**其余**\n" + "\n".join(rest)}})
 
     els.append({"tag": "note", "elements": [{"tag": "lark_md", "content":
         f"{since.astimezone(tz):%m-%d %H:%M} → {now:%m-%d %H:%M} · "
-        f"只收有实质进展的（新提交/review/合并/关闭/讨论），"
-        f"机器人顶起来的不算 · 等级为初筛"}]})
+        f"P0 = 静默算错 或 崩溃/卡死/OOM/起不来 · 卡型只做标注不参与判级 · "
+        f"只收有实质进展的，机器人顶起来的不算"}]})
 
-    return {"config": {"wide_screen_mode": True},
-            "header": {"template": "red" if buckets["P0"] else "blue",
+    card = {"config": {"wide_screen_mode": True},
+            "header": {"template": "red" if p0_total else "blue",
                        "title": {"tag": "plain_text",
                                  "content": f"DeepSeek-V4.1 上游日报 {now:%m-%d}"}},
             "elements": els}
+
+    # 兜底：还是逼近上限就把灰色理由行剥掉，标题和链接优先保住
+    if len(json.dumps(card, ensure_ascii=False).encode()) > CARD_SOFT:
+        for e in card["elements"]:
+            t = (e.get("text") or {}).get("content", "")
+            if "<font color='grey'>" in t and t.startswith("**"):
+                e["text"]["content"] = t.split("\n<font color='grey'>")[0]
+        print("card: 逼近 20KB，已剥掉理由行", file=sys.stderr)
+    return card
 
 
 def post(webhook: str, secret: str | None, card: dict) -> None:
@@ -121,7 +150,7 @@ def post(webhook: str, secret: str | None, card: dict) -> None:
         digest = hmac.new(f"{ts}\n{secret}".encode(), b"", hashlib.sha256).digest()
         body["timestamp"], body["sign"] = ts, base64.b64encode(digest).decode()
     raw = json.dumps(body, ensure_ascii=False).encode()
-    if len(raw) > 20 * 1024:
+    if len(raw) > CARD_LIMIT:
         sys.exit(f"card body {len(raw)}B exceeds the 20KB webhook limit")
     req = urllib.request.Request(webhook, data=raw, method="POST")
     req.add_header("Content-Type", "application/json")
