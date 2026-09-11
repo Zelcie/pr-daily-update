@@ -11,6 +11,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
 
 # (档位, 一句话定义, [(小类, 具体表现)])
 LEVELS: list[tuple[str, str, list[tuple[str, str]]]] = [
@@ -101,3 +106,62 @@ def prompt_block() -> str:
 def version() -> str:
     """标准内容的短哈希。改了标准这个值就变。"""
     return hashlib.sha256(prompt_block().encode()).hexdigest()[:8]
+
+
+# ---------------------------------------------------------------- 可编辑来源
+
+REPO = os.environ.get("GITHUB_REPOSITORY", "Zelcie/pr-daily-update")
+
+
+def _fetch_issue(number: str, token: str | None) -> str:
+    req = urllib.request.Request(
+        f"https://api.github.com/repos/{REPO}/issues/{number}")
+    req.add_header("Accept", "application/vnd.github+json")
+    req.add_header("User-Agent", "pr-daily-update")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return (json.load(resp).get("body") or "").strip()
+
+
+_cache: dict | None = None
+
+
+def active(token: str | None = None) -> dict:
+    """当前生效的判定标准。
+
+    优先用 CRITERIA_ISSUE 指向的那个 issue 的正文 —— 那就是「输入栏」：在浏览器里
+    改完保存，下次运行就生效，不用碰代码。取不到就退回本文件里的内置版本。
+
+    注意 issue 正文会整段进 system prompt。只有仓库协作者能编辑正文，但这仍然是
+    一条能改变判级行为的通道，别对陌生人开放写权限。
+    """
+    global _cache
+    if _cache is not None:
+        return _cache
+
+    num = os.environ.get("CRITERIA_ISSUE", "").strip().lstrip("#")
+    text, source, url = prompt_block(), "内置（criteria.py）", (
+        f"https://github.com/{REPO}/edit/main/criteria.py")
+    if num:
+        try:
+            body = _fetch_issue(num, token)
+            if body:
+                text = body
+                source = f"Issue #{num}"
+                url = f"https://github.com/{REPO}/issues/{num}"
+            else:
+                print(f"criteria: issue #{num} 正文为空，用内置标准",
+                      file=sys.stderr)
+        except Exception as e:
+            print(f"criteria: 读不到 issue #{num}（{e}），用内置标准",
+                  file=sys.stderr)
+
+    _cache = {
+        "text": text,
+        "source": source,
+        "url": url,
+        "version": hashlib.sha256(text.encode()).hexdigest()[:8],
+        "file_url": f"https://github.com/{REPO}/edit/main/criteria.py",
+    }
+    return _cache

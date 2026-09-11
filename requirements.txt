@@ -1,0 +1,2 @@
+# 只有 LLM_PROVIDER=anthropic 时需要；openai 兼容网关走标准库 urllib
+anthropic>=1.5.0

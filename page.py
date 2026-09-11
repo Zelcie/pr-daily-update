@@ -10,6 +10,10 @@ from __future__ import annotations
 import html
 
 import criteria
+
+
+def ACTIVE_VERSION():
+    return criteria.active()["version"]
 from collections import defaultdict
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -87,6 +91,8 @@ table.ex td{padding:4px 8px 4px 0;vertical-align:top;
 table.ex td:first-child{white-space:nowrap;width:1%}
 table.ex code{font-size:11.5px;word-break:break-word}
 .muted{color:var(--muted)}
+pre.raw{white-space:pre-wrap;word-break:break-word;font-size:12px;
+  line-height:1.6;margin:0;color:var(--ink)}
 footer{margin-top:52px;padding-top:16px;border-top:1px solid var(--line);
   color:var(--muted);font-size:12px}
 """
@@ -135,11 +141,24 @@ def _md(t: str) -> str:
 def _criteria_section() -> str:
     """页尾那一栏。内容全部来自 criteria.py —— 和喂给模型的提示词同源，
     改标准两边一起变，不会出现页面挂着旧标准、模型按新标准判的情况。"""
+    a = criteria.active()
+    links = (f'<a href="{html.escape(a["url"])}" target="_blank" '
+             f'rel="noopener">改这里</a>')
+    if "Issue" in a["source"]:
+        links += (f' · <a href="{html.escape(a["file_url"])}" target="_blank" '
+                  f'rel="noopener">改内置默认值</a>')
     o = [f'<h2 id="criteria">优先级判断标准 '
-         f'<span class="n">· 版本 <code>{criteria.version()}</code></span></h2>',
-         '<p class="desc">下面就是喂给模型的原文，改动会让版本号变化 —— '
-         '版本不同的两天，标签不可直接对比。</p>',
+         f'<span class="n">· 版本 <code>{a["version"]}</code></span></h2>',
+         f'<p class="desc">当前来源：<strong>{html.escape(a["source"])}</strong>'
+         f' · {links}<br>'
+         '下面就是喂给模型的原文。改完下次运行即生效，会重新判一遍全部条目。'
+         '<strong>版本或模型不同的两天，标签不可直接对比</strong> —— '
+         '同一套标准、同一批数据，换个模型判出来的 P0 数量实测能差 30%。</p>',
          '<div class="crit">']
+    if "Issue" in a["source"]:
+        # 来自 issue 的是自由文本，结构化渲染不再成立，原样出
+        o.append(f'<pre class="raw">{html.escape(a["text"])}</pre></div>')
+        return "".join(o)
     for lvl, one_liner, groups in criteria.LEVELS:
         o.append(f'<div class="crit-lvl"><b class="{lvl.lower()}">{lvl}</b> '
                  f"{_md(one_liner)}<ul>")
@@ -160,7 +179,7 @@ def _criteria_section() -> str:
 
 def render(items: list[dict], verdicts: dict[str, dict], since: datetime,
            tz: ZoneInfo, filtered: bool, ai_on: bool) -> str:
-    from analyze import key_of
+    from analyze import _describe, key_of
     grid: dict[str, dict[str, list[dict]]] = defaultdict(lambda: defaultdict(list))
     buckets: dict[str, list[dict]] = defaultdict(list)
     for it in items:
@@ -186,7 +205,8 @@ def render(items: list[dict], verdicts: dict[str, dict], since: datetime,
     notes.append("这是<strong>初筛</strong>：模型只看得到标题和正文摘要，看不到 diff。"
                  "P0 的意思是「今天先看这几条」，不是「这几条一定出事」。"
                  f'完整判据见页尾的<a href="#criteria">优先级判断标准</a>'
-                 f"（版本 <code>{criteria.version()}</code>）。")
+                 f'（版本 <code>{ACTIVE_VERSION()}</code>，'
+                 f"模型 <code>{html.escape(_describe())}</code>）。")
     out.append('<div class="note">' + "<br>".join(notes) + "</div>")
 
     # 目录：大类 + 各档条数，P0 数字标红

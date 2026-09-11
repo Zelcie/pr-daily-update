@@ -24,8 +24,19 @@ import urllib.request
 import criteria
 from common import is_severe, kind_of, repo_of, summarize
 
-# 火山方舟（BytePlus 新加坡端点）。注意 cn-beijing 那个域名对这把 key 报
-# "The API key doesn't exist" —— 两个区的 key 不通用。
+# 两个 backend：
+#   anthropic —— 官方 SDK，凭据来自 ANTHROPIC_API_KEY 或 `ant auth login` 的
+#                profile（裸 Anthropic() 会自己找，不用显式传）
+#   openai    —— 任何 OpenAI 兼容网关（火山方舟、内网网关…），走 LLM_API_KEY
+PROVIDER = os.environ.get("LLM_PROVIDER", "anthropic")
+
+# anthropic backend
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-5")
+# 判级是批量分类，但判据本身不简单（P0 的线调了五轮才稳），所以给中等 effort
+EFFORT = os.environ.get("TRIAGE_EFFORT", "medium")
+
+# openai 兼容 backend。注意方舟的 key 绑区域：这把新加坡的 key 在
+# cn-beijing 端点报 "The API key doesn't exist"，看起来像 key 作废。
 BASE_URL = os.environ.get(
     "LLM_BASE_URL", "https://ark.ap-southeast.bytepluses.com/api/v3")
 MODEL = os.environ.get("LLM_MODEL", "seed-sc-260628")
@@ -46,16 +57,23 @@ SCHEMA = {
     "additionalProperties": False,
 }
 
-SYSTEM = """\
+_PREFACE = """\
 你在为一支自建大模型推理服务的性能团队做上游情报初筛。他们在 NVIDIA GPU 上跑
 DeepSeek-V4.1 系列的在线推理，主力并行形态是 EP / DP / PP 加 PD 分离，
 默认开 CUDA Graph FULL，涉及投机解码、稀疏 MLA、KV cache、MoE 路由等路径。
 
-""" + criteria.prompt_block() + """
+"""
+
+_TAIL = """
 
 只输出 JSON，不要解释、不要代码围栏，形状固定为：
 {"items":[{"id":"原样抄回输入里的 id","level":"P0|P1|P2","reason":"一句中文，说清后果是什么，不要复述标题"}]}
 输入里的每一条都必须在 items 里出现一次。"""
+
+
+def system_prompt(token=None):
+    """运行时拼 —— 中间那段标准可能来自 issue 正文，不是编译期常量。"""
+    return _PREFACE + criteria.active(token)["text"] + _TAIL
 
 
 def key_of(item: dict) -> str:
@@ -99,7 +117,7 @@ def _post(payload: list[dict], api_key: str, fmt: dict, timeout: int) -> dict:
     body = json.dumps({
         "model": MODEL,
         "messages": [
-            {"role": "system", "content": SYSTEM},
+            {"role": "system", "content": system_prompt()},
             {"role": "user", "content":
              f"给下面 {len(payload)} 条评级：\n"
              + json.dumps(payload, ensure_ascii=False)},
@@ -133,12 +151,48 @@ def _call(payload: list[dict], api_key: str, timeout: int = 240) -> dict:
         return _post(payload, api_key, _LOOSE, timeout)
 
 
+def _call_anthropic(payload: list[dict], timeout: int = 600) -> dict:
+    """官方 SDK。凭据由 SDK 自己解析：ANTHROPIC_API_KEY，或 `ant auth login`
+    存在 ~/.config/anthropic/ 的 profile —— 所以裸 Anthropic() 就够了。"""
+    import anthropic
+
+    client = anthropic.Anthropic(timeout=timeout)
+    with client.messages.stream(
+        model=ANTHROPIC_MODEL,
+        max_tokens=16000,
+        system=system_prompt(),
+        messages=[{"role": "user", "content":
+                   f"给下面 {len(payload)} 条评级：\n"
+                   + json.dumps(payload, ensure_ascii=False)}],
+        thinking={"type": "adaptive"},
+        output_config={"effort": EFFORT,
+                       "format": {"type": "json_schema", "schema": SCHEMA}},
+    ) as stream:
+        msg = stream.get_final_message()
+    if msg.stop_reason == "refusal":
+        raise RuntimeError(f"refused: {msg.stop_details}")
+    text = next(b.text for b in msg.content if b.type == "text")
+    return _extract_json(text)
+
+
+def _describe() -> str:
+    return (f"anthropic/{ANTHROPIC_MODEL}" if PROVIDER == "anthropic"
+            else f"openai/{MODEL}")
+
+
 def triage(items: list[dict], batch: int = 40) -> dict[str, dict]:
     """返回 {repo#num: {level, reason, ai}}。凭据缺失或调用失败即降级。"""
     if not items:
         return {}
+    anthropic_mode = PROVIDER == "anthropic"
     api_key = os.environ.get("LLM_API_KEY")
-    if not api_key:
+    if anthropic_mode:
+        try:
+            import anthropic  # noqa: F401
+        except ImportError:
+            print("analyze: 未安装 anthropic SDK，降级到规则打分", file=sys.stderr)
+            return _fallback(items)
+    elif not api_key:
         print("analyze: 无 LLM_API_KEY，降级到规则打分", file=sys.stderr)
         return _fallback(items)
 
@@ -151,7 +205,9 @@ def triage(items: list[dict], batch: int = 40) -> dict[str, dict]:
                     "title": it["title"],
                     "summary": summarize(it.get("body"), 400)} for it in chunk]
         try:
-            rows = _call(payload, api_key).get("items", [])
+            raw = (_call_anthropic(payload) if anthropic_mode
+                   else _call(payload, api_key))
+            rows = raw.get("items", [])
         except Exception as e:
             print(f"analyze: 第 {i // batch + 1} 批失败（{e}），该批降级",
                   file=sys.stderr)
