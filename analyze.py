@@ -24,8 +24,27 @@ import urllib.request
 import criteria
 from common import is_severe, kind_of, repo_of, summarize
 
-BASE_URL = os.environ.get("LLM_BASE_URL", "https://f7xnt9mg.fn.bytedance.net/v1")
-MODEL = os.environ.get("LLM_MODEL", "gpt-6-astra")
+# 火山方舟（BytePlus 新加坡端点）。注意 cn-beijing 那个域名对这把 key 报
+# "The API key doesn't exist" —— 两个区的 key 不通用。
+BASE_URL = os.environ.get(
+    "LLM_BASE_URL", "https://ark.ap-southeast.bytepluses.com/api/v3")
+MODEL = os.environ.get("LLM_MODEL", "seed-sc-260628")
+
+# 并非所有模型都吃 json_schema：实测 seed-sc 支持，glm-5-2-260710 直接返回
+# InvalidParameter。所以先试严格 schema，被拒就退回 json_object，两个都失败
+# 还有 _extract_json 兜底。
+SCHEMA = {
+    "type": "object",
+    "properties": {"items": {"type": "array", "items": {
+        "type": "object",
+        "properties": {"id": {"type": "string"},
+                       "level": {"type": "string", "enum": ["P0", "P1", "P2"]},
+                       "reason": {"type": "string"}},
+        "required": ["id", "level", "reason"],
+        "additionalProperties": False}}},
+    "required": ["items"],
+    "additionalProperties": False,
+}
 
 SYSTEM = """\
 你在为一支自建大模型推理服务的性能团队做上游情报初筛。他们在 NVIDIA GPU 上跑
@@ -76,7 +95,7 @@ def _extract_json(text: str) -> dict:
     raise ValueError("unbalanced JSON in response")
 
 
-def _call(payload: list[dict], api_key: str, timeout: int = 180) -> dict:
+def _post(payload: list[dict], api_key: str, fmt: dict, timeout: int) -> dict:
     body = json.dumps({
         "model": MODEL,
         "messages": [
@@ -85,8 +104,7 @@ def _call(payload: list[dict], api_key: str, timeout: int = 180) -> dict:
              f"给下面 {len(payload)} 条评级：\n"
              + json.dumps(payload, ensure_ascii=False)},
         ],
-        # 只有 json_object 被这个网关认；json_schema 会被静默忽略
-        "response_format": {"type": "json_object"},
+        "response_format": fmt,
         "max_tokens": 8000,
     }).encode()
     req = urllib.request.Request(f"{BASE_URL}/chat/completions", data=body,
@@ -96,6 +114,23 @@ def _call(payload: list[dict], api_key: str, timeout: int = 180) -> dict:
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         data = json.load(resp)
     return _extract_json(data["choices"][0]["message"]["content"])
+
+
+_STRICT = {"type": "json_schema",
+           "json_schema": {"name": "triage", "strict": True, "schema": SCHEMA}}
+_LOOSE = {"type": "json_object"}
+
+
+def _call(payload: list[dict], api_key: str, timeout: int = 240) -> dict:
+    try:
+        return _post(payload, api_key, _STRICT, timeout)
+    except urllib.error.HTTPError as e:
+        if e.code != 400:
+            raise
+        # 模型不支持严格 schema，退回 json_object
+        print(f"analyze: {MODEL} 拒绝 json_schema，退回 json_object",
+              file=sys.stderr)
+        return _post(payload, api_key, _LOOSE, timeout)
 
 
 def triage(items: list[dict], batch: int = 40) -> dict[str, dict]:

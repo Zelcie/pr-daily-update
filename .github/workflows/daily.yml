@@ -52,10 +52,10 @@ jobs:
           # 没有它 search 只有 10 次/分钟，且「有效更新」过滤会整个跳过
           # （一轮上百个 timeline 请求，未认证 60 次/小时必然 403）
           GITHUB_TOKEN: ${{ github.token }}
-          # 公司网关。缺失则降级成规则打分，页面顶部会标明未经 AI 评估
+          # 火山方舟。缺失则降级成规则打分，页面顶部和日志都会标明
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
-          LLM_BASE_URL: ${{ vars.LLM_BASE_URL || 'https://f7xnt9mg.fn.bytedance.net/v1' }}
-          LLM_MODEL: ${{ vars.LLM_MODEL || 'gpt-6-astra' }}
+          LLM_BASE_URL: ${{ vars.LLM_BASE_URL || 'https://ark.ap-southeast.bytepluses.com/api/v3' }}
+          LLM_MODEL: ${{ vars.LLM_MODEL || 'seed-sc-260628' }}
           PAGE_URL: ${{ vars.PAGE_URL || format('https://{0}.github.io/{1}/', github.repository_owner, github.event.repository.name) }}
           WINDOW_HOURS: ${{ inputs.window_hours || '25' }}
           # push 触发时只出页面不发卡片；定时和手动触发照常发

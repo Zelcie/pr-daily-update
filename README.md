@@ -62,14 +62,18 @@ issue 另外过一道硬筛：只留未关闭、非 `stale`/`inactive`、标题�
 哪个配置。P0 的意思是「今天先看这几条」，不是「这几条一定出事」。提示词里明确要求
 拿不准往低了报 —— P0 泛滥等于没有 P0。
 
-### 网关的一个坑
+### 网关与模型的三个坑
 
-**不要用 `response_format: {"type":"json_schema"}`。** 实测这个网关会**静默忽略**它，
-照样返回 Markdown 表格且不报错 —— 照着 OpenAI 文档写代码会炸在 JSON 解析上，
-而且是运行时才炸。只有 `{"type":"json_object"}` 是认的，所以输出形状靠提示词约定
-加 `_extract_json()` 兜底解析（剥代码围栏、括号配对挖最外层对象），不能靠 schema 保证。
+**区域不通用。** 这把 key 在 `ark.ap-southeast.bytepluses.com`（BytePlus 新加坡）
+有效，在 `ark.cn-beijing.volces.com` 报 `The API key doesn't exist`。
 
-模型漏条目或抄错 id 也见过，所以最后会对账补齐，不让页面出现没有等级的行。
+**`json_schema` 不是所有模型都吃。** `seed-sc-260628` 支持，`glm-5-2-260710`
+直接返回 `InvalidParameter`。所以代码先试严格 schema，被 400 拒就退回
+`json_object`，两个都不行还有 `_extract_json()` 兜底（剥代码围栏、括号配对挖最
+外层对象）。**更早用过的那个内网网关更坑：它对 `json_schema` 是静默忽略**，
+HTTP 200 照样返回 Markdown 表格，照文档写代码会在运行时炸在 JSON 解析上。
+
+**模型漏条目或抄错 id 都见过**，所以最后会对账补齐，不让页面出现没有等级的行。
 
 ## 为什么是现在这个形状
 
@@ -99,9 +103,9 @@ LARK_WEBHOOK='https://open.larkoffice.com/open-apis/bot/v2/hook/xxx' \
 | `LARK_WEBHOOK` | 发卡片时必填 |
 | `LARK_SECRET` | 群里开了「签名校验」就必填 |
 | `LARK_KEYWORD` | 群里开了「自定义关键词」就必填，见下 |
-| `LLM_API_KEY` | 公司网关 key。缺失则降级成规则打分 |
-| `LLM_BASE_URL` | 默认 `https://f7xnt9mg.fn.bytedance.net/v1` |
-| `LLM_MODEL` | 默认 `gpt-6-astra` |
+| `LLM_API_KEY` | 火山方舟 key。缺失则降级成规则打分 |
+| `LLM_BASE_URL` | 默认 `https://ark.ap-southeast.bytepluses.com/api/v3` |
+| `LLM_MODEL` | 默认 `seed-sc-260628` |
 | `GITHUB_TOKEN` | 强烈建议。未认证的 search API 只有 10 次/分钟，认证后 30 次 |
 | `PAGE_URL` | 明细页地址，卡片锚点链接的前缀 |
 | `WINDOW_HOURS` | PR 回看窗口，默认 25（比 24 多 1 小时，避免 cron 抖动漏掉） |
