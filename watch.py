@@ -45,8 +45,8 @@ import criteria  # noqa: E402
 import page  # noqa: E402
 from analyze import _describe, key_of, triage  # noqa: E402
 from common import (COMPONENT_LABELS, COMPONENT_ORDER, card_of,  # noqa: E402
-                    collect, component_of, filter_effective, keep_issue,
-                    state_of)
+                    collect, component_of, filter_effective, is_new,
+                    keep_issue, state_of)
 
 DEFAULT_PAGE = "https://zelcie.github.io/pr-daily-update/"
 CARD_P0_CAP = 20      # 单次卡片最多列这么多 P0，其余给个跳转
@@ -72,8 +72,14 @@ def build_card(items: list[dict], verdicts: dict, since: datetime, tz: ZoneInfo,
     now = datetime.now(tz)
     base = page_url.rstrip("/") + "/"
 
-    lead = (f"DeepSeek-V4.1 上游今日 **{len(items)}** 条 · "
-            f"**P0 {p0_total}** · [看全部]({base})")
+    fresh = sum(1 for i in items if is_new(i, since))
+    p0_fresh = sum(1 for c in grid for i in grid[c]["P0"] if is_new(i, since))
+    # 「今日 N 条」会被读成「今天新出 N 条」，但窗口卡的是 updated_at，
+    # 实测四成条目超过一周。新增和存量的行动完全不同，必须分开写。
+    lead = (f"**P0 {p0_total}**"
+            + (f"（今日新增 **{p0_fresh}**）" if p0_fresh else "（均为存量）")
+            + f" · 今日有进展 {len(items)} 条，其中新建 {fresh} 条"
+            f" · [看全部]({base})")
     if keyword and keyword.lower() not in lead.lower():
         lead = f"{keyword} · {lead}"
     els: list[dict] = [{"tag": "div", "text": {"tag": "lark_md", "content": lead}}]
@@ -88,6 +94,7 @@ def build_card(items: list[dict], verdicts: dict, since: datetime, tz: ZoneInfo,
         p0 = grid[c]["P0"]
         if not p0 or shown >= CARD_P0_CAP:
             continue
+        p0 = sorted(p0, key=lambda i: not is_new(i, since))
         take = p0[:CARD_P0_CAP - shown]
         shown += len(take)
         els.append({"tag": "hr"})
@@ -99,8 +106,9 @@ def build_card(items: list[dict], verdicts: dict, since: datetime, tz: ZoneInfo,
             _, st = state_of(it)
             card = card_of(it["title"])
             meta = " · ".join(x for x in (st, card) if x)
+            tag = "🆕 " if is_new(it, since) else ""
             els.append({"tag": "div", "text": {"tag": "lark_md", "content":
-                f"**{'🐞 ' if 'pull_request' not in it else ''}"
+                f"**{tag}{'🐞 ' if 'pull_request' not in it else ''}"
                 f"[{it['title']}]({it['html_url']})**\n"
                 f"<font color='grey'>{v.get('reason', '')} · {meta}</font>"}})
     if p0_total > shown:
@@ -124,7 +132,7 @@ def build_card(items: list[dict], verdicts: dict, since: datetime, tz: ZoneInfo,
 
     els.append({"tag": "note", "elements": [{"tag": "lark_md", "content":
         f"{since.astimezone(tz):%m-%d %H:%M} → {now:%m-%d %H:%M} · "
-        f"只收有实质进展的，机器人顶起来的不算 · "
+        f"窗口卡的是「有进展」不是「新建」·「🆕 今日新增」才是今天才出现的 · "
         f"[判定标准 {criteria.active()['version']}]({base}#criteria)"}]})
 
     card = {"config": {"wide_screen_mode": True},

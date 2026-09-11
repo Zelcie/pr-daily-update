@@ -311,18 +311,37 @@ def summarize(body: str | None, limit: int = 260) -> str:
 
 # Search API 的 updated_at 被任何活动顶起来 —— 机器人评论、加个标签、点个赞
 # 都算，所以「今天有更新」里混着大量没实质进展的条目。真正的进展要看 timeline。
-MEANINGFUL_EVENTS = {
-    "committed",            # 推了新提交
-    "head_ref_force_pushed",
-    "reviewed",             # 有人 review
-    "merged", "closed", "reopened",
-    "ready_for_review", "convert_to_draft",
-    "commented",            # 人写的评论（机器人在下面过滤掉）
-    "review_requested",
-}
-# 这些账号刷的活动不算进展
+# 「有进展」和「有实质进展」是两回事。Search 的 updated_at 被任何活动顶起来，
+# 而 timeline 里的活动也大半不是进展 —— 实测人写的评论中位数是 **7 个字符**，
+# 内容是 `/ci run`（人手敲的 CI 触发命令，按用户名过滤机器人拦不住它）。
+#
+# 所以 PR 和 issue 分开判：
+#   PR   —— 只认代码动了或状态变了。讨论不算进展。
+#   issue —— 没有 commit 可看，评论就是唯一信号，但要求有实质内容。
+
+# 代码真的动了
+CODE_EVENTS = {"committed", "head_ref_force_pushed"}
+# 状态真的变了
+STATE_EVENTS = {"merged", "closed", "reopened", "ready_for_review",
+                "convert_to_draft"}
+# 有结论的 review 才算；单纯 COMMENTED 的 review 归到讨论里
+REVIEW_VERDICTS = {"approved", "changes_requested"}
+
+# 机器人账号
 BOT_ACTORS = re.compile(r"\[bot\]$|^(github-actions|codecov|mergify|dependabot"
                         r"|pre-commit-ci|sourcery-ai|coderabbitai)$", re.I)
+# 人手敲的机器命令：/ci run、/retest、/lgtm、/approve…
+SLASH_CMD = re.compile(r"^\s*/[a-z][\w-]*(\s|$)", re.I)
+# 低于这个长度的评论当寒暄。实测评论长度 p25=7、p50=7、p75=74，
+# 40 落在那堆 `/ci run` 之上、真正讨论之下。
+MIN_COMMENT = 40
+
+
+def _substantive_comment(ev: dict) -> bool:
+    body = (ev.get("body") or "").strip()
+    if not body or SLASH_CMD.match(body):
+        return False
+    return len(body) >= MIN_COMMENT
 
 
 def _last_page_url(url: str, token: str | None) -> tuple[list, str | None]:
@@ -354,15 +373,16 @@ def _fetch_timeline(item: dict, token: str | None) -> list:
         return []      # 单条失败不该拖垮整轮，退化成「按 updated_at 算有更新」
 
 
-def effective_events(item: dict, since: datetime, token: str | None) -> list[str]:
-    """窗口内发生过的实质事件类型。空列表 = 只是被顶了一下。"""
+def effective_events(item: dict, since: datetime,
+                     token: str | None) -> list[str]:
+    """窗口内的**实质**进展。空列表 = 只是被顶了一下。"""
+    is_pr = "pull_request" in item
     out = []
     for ev in _fetch_timeline(item, token):
         kind = ev.get("event")
-        if kind not in MEANINGFUL_EVENTS:
-            continue
-        ts = (ev.get("created_at") or ev.get("committer", {}).get("date")
-              or (ev.get("commit_id") and ev.get("author", {}).get("date")))
+        ts = (ev.get("created_at")
+              or (ev.get("committer") or {}).get("date")
+              or (ev.get("author") or {}).get("date"))
         if not ts:
             continue
         try:
@@ -371,27 +391,66 @@ def effective_events(item: dict, since: datetime, token: str | None) -> list[str
             continue
         if when < since:
             continue
-        actor = (ev.get("actor") or {}).get("login") or ""
+        actor = ((ev.get("actor") or {}).get("login")
+                 or (ev.get("user") or {}).get("login") or "")
         if actor and BOT_ACTORS.search(actor):
             continue
-        out.append(kind)
+
+        if kind in CODE_EVENTS or kind in STATE_EVENTS:
+            out.append(kind)
+        elif kind == "reviewed":
+            if str(ev.get("state", "")).lower() in REVIEW_VERDICTS:
+                out.append("reviewed")
+        elif kind == "commented" and not is_pr and _substantive_comment(ev):
+            # issue 没有 commit 可看，一条像样的讨论就是进展；PR 不吃这套
+            out.append("discussed")
     return out
+
+
+def is_new(item: dict, since: datetime) -> bool:
+    """这一条是不是窗口内新建的。
+
+    搜索窗口卡的是 updated_at，所以「今天有更新」里混着大量存量 —— 实测 42%
+    超过一周、18% 超过一个月，最老的 289 天。「今天新冒出来的 P0」和「挂了三周
+    的 P0」行动完全不同：前者立刻看，后者该排期。
+    """
+    try:
+        created = datetime.fromisoformat(item["created_at"].replace("Z", "+00:00"))
+    except (KeyError, ValueError):
+        return False
+    return created >= since
 
 
 def filter_effective(items: list[dict], since: datetime,
                      token: str | None, workers: int = 8) -> list[dict]:
-    """只留窗口内有实质进展的。没 token 就不做 —— 未认证 60 次/小时，
-    一轮上百个 timeline 请求必然 403，宁可不筛也别筛出个空列表。"""
+    """只留窗口内**新建的**或**有实质进展的**。
+
+    新建无条件保留 —— 它本身就是最强的进展信号，不该再要求 timeline 证明。
+    这一条很要紧：今天刚开的 issue 往往一条评论都没有，timeline 是空的，
+    只看事件会把它整个丢掉，而那恰恰是最该看的东西。
+
+    没 token 就不筛 —— 未认证 60 次/小时，一轮上百个 timeline 请求必然 403，
+    宁可不筛也别筛出个空列表。
+    """
     if not token:
         for it in items:
             it["_events"] = []
+            it["_fresh"] = is_new(it, since)
         return items
+
     from concurrent.futures import ThreadPoolExecutor
+
+    fresh = [is_new(it, since) for it in items]
+    # 新建的不必查 timeline，省掉一批请求
+    need = [it for it, f in zip(items, fresh) if not f]
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        evs = list(pool.map(lambda i: effective_events(i, since, token), items))
+        got = dict(zip((id(x) for x in need),
+                       pool.map(lambda i: effective_events(i, since, token), need)))
+
     kept = []
-    for it, ev in zip(items, evs):
-        it["_events"] = ev
-        if ev:
+    for it, f in zip(items, fresh):
+        it["_fresh"] = f
+        it["_events"] = ["created"] if f else got.get(id(it), [])
+        if f or it["_events"]:
             kept.append(it)
     return kept

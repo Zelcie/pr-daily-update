@@ -19,7 +19,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from common import (COMPONENT_LABELS, COMPONENT_ORDER, card_of, component_of,
-                    repo_of, state_of, summarize)
+                    is_new, repo_of, state_of, summarize)
 
 LEVELS = [lvl for lvl, _o, _g in criteria.LEVELS]
 LEVEL_DESC = {lvl: one for lvl, one, _g in criteria.LEVELS}
@@ -64,6 +64,9 @@ li.p0 a.t{font-weight:700}
 .why.ai::before{content:"AI ";font-size:10px;letter-spacing:.06em;
   color:var(--accent);font-weight:600}
 .ev{font-size:11px;color:var(--muted)}
+.new{font-size:10px;font-weight:700;color:var(--p0);border:1px solid var(--p0);
+  border-radius:3px;padding:0 4px;vertical-align:1px}
+li.fresh{background:linear-gradient(90deg,var(--p0-bg),transparent 60%)}
 .toc{display:flex;flex-wrap:wrap;gap:7px;margin:0 0 8px}
 .toc a{display:flex;align-items:baseline;gap:7px;font-size:12.5px;
   text-decoration:none;color:var(--ink);background:var(--panel);
@@ -97,14 +100,13 @@ footer{margin-top:52px;padding-top:16px;border-top:1px solid var(--line);
   color:var(--muted);font-size:12px}
 """
 
-EV_LABEL = {"committed": "新提交", "head_ref_force_pushed": "强推",
-            "reviewed": "review", "merged": "合并", "closed": "关闭",
+EV_LABEL = {"created": "新建", "committed": "新提交", "head_ref_force_pushed": "强推",
+            "reviewed": "有结论的 review", "merged": "合并", "closed": "关闭",
             "reopened": "重开", "ready_for_review": "转正式",
-            "convert_to_draft": "转草稿", "commented": "讨论",
-            "review_requested": "求 review"}
+            "convert_to_draft": "转草稿", "discussed": "实质讨论"}
 
 
-def _line(it: dict, verdict: dict, tz: ZoneInfo) -> str:
+def _line(it: dict, verdict: dict, tz: ZoneInfo, since=None) -> str:
     lvl = verdict.get("level", "P2")
     emoji, st = state_of(it)
     is_issue = "pull_request" not in it
@@ -118,7 +120,10 @@ def _line(it: dict, verdict: dict, tz: ZoneInfo) -> str:
         bits.append(f' · <span class="ev">今日 {"/".join(evs[:3])}</span>')
     bits.append("</span>")
 
-    out = [f'<li class="{lvl.lower()}">']
+    fresh = since is not None and is_new(it, since)
+    out = [f'<li class="{lvl.lower()}{" fresh" if fresh else ""}">']
+    if fresh:
+        out.append('<span class="new">今日新增</span> ')
     out.append(f'<a class="t" href="{html.escape(it["html_url"])}" target="_blank" '
                f'rel="noopener">{"🐞 " if is_issue else ""}'
                f'{html.escape(repo_of(it))} #{it["number"]} · '
@@ -191,7 +196,9 @@ def render(items: list[dict], verdicts: dict[str, dict], since: datetime,
     out = ['<div class="wrap">',
            "<h1>DeepSeek-V4.1 · vLLM / SGLang 每日进展</h1>"]
     out.append(f'<div class="sub">{since.astimezone(tz):%m-%d %H:%M} → '
-               f'{now:%m-%d %H:%M} ({tz.key}) · 共 {len(items)} 条 · '
+               f'{now:%m-%d %H:%M} ({tz.key}) · 共 {len(items)} 条'
+               f'（今日新增 <strong>{sum(1 for i in items if is_new(i, since))}</strong>，'
+               f'其余为存量条目今日有进展）· '
                + " · ".join(f"{l} {len(buckets[l])}" for l in LEVELS) + "</div>")
 
     notes = []
@@ -233,7 +240,9 @@ def render(items: list[dict], verdicts: dict[str, dict], since: datetime,
             out.append(f'<h3 id="{c}-{lvl.lower()}" class="{lvl.lower()}">{lvl} '
                        f'<span class="n">· {len(rows)} 条</span></h3>')
             out.append("<ul>")
-            out += [_line(it, verdicts.get(key_of(it), {}), tz) for it in rows]
+            rows = sorted(rows, key=lambda i: not is_new(i, since))
+            out += [_line(it, verdicts.get(key_of(it), {}), tz, since)
+                    for it in rows]
             out.append("</ul>")
 
     out.append(_criteria_section())
