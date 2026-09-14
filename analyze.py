@@ -58,9 +58,16 @@ SCHEMA = {
 }
 
 _PREFACE = """\
-你在为一支自建大模型推理服务的性能团队做上游情报初筛。他们在 NVIDIA GPU 上跑
-DeepSeek-V4.1 系列的在线推理，主力并行形态是 EP / DP / PP 加 PD 分离，
-默认开 CUDA Graph FULL，涉及投机解码、稀疏 MLA、KV cache、MoE 路由等路径。
+你在为一支自建大模型推理服务的性能团队做上游情报初筛。
+
+他们在 NVIDIA GPU（B200 / GB200 / B300 为主）上跑在线推理，在跑的模型是
+**DeepSeek-V4.1 系列、GLM-5.x、Kimi-K3**。主力并行形态是 EP / DP / PP 加
+PD 分离，默认开 CUDA Graph FULL。
+
+他们盯的推理路径组件：稀疏 MLA 与 indexer、KV cache（含 FP4/FP8 KV）、
+投机解码（DSpark / DFlash / MTP）、MoE 路由与 DeepEP、EPLB、CUDA Graph。
+所以**一条 PR 只要落在这些组件上就与他们相关，哪怕标题里的模型名不是
+他们在跑的那几个** —— 组件是共用的。
 
 """
 

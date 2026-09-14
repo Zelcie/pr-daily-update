@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 import time
 import urllib.parse
 import urllib.request
@@ -15,7 +16,24 @@ REPOS = ["vllm-project/vllm", "sgl-project/sglang"]
 # 只搜标题：实测 `deepseek in:title,body` 七天回来 717 条，绝大多数是 PR 模板里
 # 顺口提一句 deepseek，还会把 `[HiCache] ... NAME_MAX` 误判成 V4.1 命中；
 # 换成 in:title 七天 177 条，噪声基本消失。
-SEARCH_TERMS = ["deepseek", "dsv4", "engram", "dspark", "hisparse", "dflash"]
+# 关心的不是模型名，而是**推理路径上的组件** —— 上游改 MLA / indexer / DeepEP /
+# cudagraph 的 PR，标题里往往根本不出现模型名。实测只用模型名会漏掉三成七：
+# 48h 窗口里 mla 漏 33、indexer 漏 22、deepep 和 cudagraph 覆盖率为 0。
+SEARCH_TERMS = [
+    # 模型
+    "deepseek", "dsv4", "kimi-k3", "glm-5", "qwen",
+    # V4.1 专属组件
+    "engram",
+    # 投机解码 / KV（跨模型）
+    "dspark", "dflash", "hisparse",
+    # 推理路径组件
+    "mla", "indexer", "deepep", "eplb", "cudagraph", "fp4",
+]
+
+# 每轮 = len(SEARCH_TERMS) × 2（PR + issue）次 search 请求。认证后 search 的
+# 限额是 30 次/分钟，14 个词正好顶到线上，不节流会间歇吃 403。
+SEARCH_GAP_TOKEN = 2.5
+SEARCH_GAP_ANON = 7.0     # 未认证只有 10 次/分钟
 
 GITHUB_SEARCH = "https://api.github.com/search/issues"
 
@@ -35,9 +53,14 @@ def _w(*alts: str) -> re.Pattern:
 # 大类的先后，不影响 P0/P1/P2 的判定，那个只看「能不能正确 serve 起来」。
 # 非 NVIDIA 后端单独成类沉底：不是说它们不重要，是我们不跑。
 COMPONENTS: list[tuple[str, str, re.Pattern]] = [
-    ("otherhw", "🔌 非 NVIDIA 后端", _w(
-        "rocm", "amd", "npu", "ascend", "cann", "xpu", "tpu", "hpu", "gaudi",
-        "gfx\\d+", "maca", "intel", "cpu")),
+    # 非 NVIDIA 拆开：以前挤成一个 74 条的大桶，看不出是哪条线在动。
+    # 仍然排在最前面拦截 —— 目的是别让它们散进主路径大类里污染视线。
+    ("rocm", "🔴 ROCm / AMD", _w(
+        "rocm", "amd", "hip", "aiter", r"gfx\d+", "mi\\d{3}x?", "instinct")),
+    ("npu", "🟣 NPU / 昇腾", _w("npu", "ascend", "cann", "atb", "mindie")),
+    ("xpu", "🔵 XPU / Intel", _w("xpu", "intel", "oneapi", "sycl", "gaudi", "hpu")),
+    ("othercpu", "⚪ CPU / 其他后端", _w(
+        "cpu", "arm64", "aarch64", "tpu", "maca", "metax", "mlu", "cambricon")),
     ("engram", "🧬 Engram", _w("engram")),
     ("spec", "🚀 投机解码", _w(
         "dspark", "dflash", "spec", "speculative", "mtp", "eagle",
@@ -177,8 +200,19 @@ def _search(term: str, since: str, token: str | None,
     req.add_header("User-Agent", "dsv41-watch")
     if token:
         req.add_header("Authorization", f"Bearer {token}")
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        return json.load(resp).get("items", [])
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                return json.load(resp).get("items", [])
+        except urllib.error.HTTPError as e:
+            if e.code not in (403, 429) or attempt == 2:
+                raise
+            # 二级限流：退避后重来，别让一次 403 吞掉整个关键词
+            wait = int(e.headers.get("Retry-After") or 0) or 20 * (attempt + 1)
+            print(f"search: {term} 被限流（{e.code}），等 {wait}s 重试",
+                  file=sys.stderr)
+            time.sleep(wait)
+    return []
 
 
 def collect(since: datetime, token: str | None,
@@ -187,8 +221,8 @@ def collect(since: datetime, token: str | None,
     stamp = since.strftime("%Y-%m-%dT%H:%M:%SZ")
     merged: dict[int, dict] = {}
     for i, term in enumerate(SEARCH_TERMS):
-        if i and not token:
-            time.sleep(7)  # 未认证时只有 10 次/分钟，隔开一点免得吃 403
+        if i:
+            time.sleep(SEARCH_GAP_TOKEN if token else SEARCH_GAP_ANON)
         for item in _search(term, stamp, token, kind=kind):
             merged[item["id"]] = item
     return sorted(merged.values(), key=lambda x: x["updated_at"], reverse=True)

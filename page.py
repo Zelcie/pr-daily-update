@@ -47,6 +47,7 @@ body{margin:0;background:var(--bg);color:var(--ink);
 .wrap{max-width:900px;margin:0 auto;padding:32px 20px 80px}
 h1{font-size:24px;margin:0 0 4px;letter-spacing:-.01em}
 .sub{color:var(--muted);font-size:13px;margin-bottom:30px}
+.scope{color:var(--muted);font-size:12px;margin:2px 0 6px}
 h2{font-size:17px;margin:34px 0 2px;padding-top:14px;border-top:1px solid var(--line)}
 h2 .n{color:var(--muted);font-weight:400;font-size:14px}
 .desc{font-size:12px;color:var(--muted);margin:0 0 14px}
@@ -194,7 +195,8 @@ def render(items: list[dict], verdicts: dict[str, dict], since: datetime,
 
     now = datetime.now(tz)
     out = ['<div class="wrap">',
-           "<h1>DeepSeek-V4.1 · vLLM / SGLang 每日进展</h1>"]
+           "<h1>上游推理进展 · vLLM / SGLang</h1>",
+           '<div class="scope">DeepSeek-V4.1 · GLM-5.x · Kimi-K3 · 稀疏 MLA / indexer / KV / 投机解码 / MoE·DeepEP / EPLB / CUDA Graph</div>']
     out.append(f'<div class="sub">{since.astimezone(tz):%m-%d %H:%M} → '
                f'{now:%m-%d %H:%M} ({tz.key}) · 共 {len(items)} 条'
                f'（今日新增 <strong>{sum(1 for i in items if is_new(i, since))}</strong>，'
@@ -250,5 +252,5 @@ def render(items: list[dict], verdicts: dict[str, dict], since: datetime,
                f"{now:%Y-%m-%d %H:%M %Z}</footer></div>")
     return ('<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width,initial-scale=1">'
-            "<title>DeepSeek-V4.1 每日进展</title>"
+            "<title>上游推理进展日报</title>"
             f"<style>{CSS}</style></head><body>" + "".join(out) + "</body></html>")

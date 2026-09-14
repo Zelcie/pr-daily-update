@@ -74,6 +74,8 @@ EXAMPLES: list[tuple[str, str, str]] = [
     ("P1", "[Perf] v0.28.0 needs ~4 GiB/GPU more non-KV memory than v0.27",
      "性能／显存退化，退化是 P1"),
     ("P1", "[Model] Support DeepSeek-V4.1-Flash", "新能力"),
+    ("P2", "[Model] Add Qwen3-Omni multimodal support",
+     "不是我们在跑的模型，组件也不共用"),
     ("P1", "refactor: streamline DeepSeek V4 mHC warmup", "重构且无故障描述"),
     ("P1", "[ROCm] Fixing GLM-5.1, DeepSeek-V3.2, DeepSeek-V4 on gfx942/gfx950",
      "只在 AMD 上崩，我们不跑"),

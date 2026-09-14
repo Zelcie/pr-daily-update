@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""每天把 vLLM / SGLang 上跟 DeepSeek-V4.1 有关的进展推到飞书群。
+"""每天把 vLLM / SGLang 上跟我们推理路径有关的进展推到飞书群。
 
 产出两样：
   1. site/index.html —— 按 P0/P1/P2 分组的朴素链接列表，每条带 AI 评级理由
@@ -76,9 +76,8 @@ def build_card(items: list[dict], verdicts: dict, since: datetime, tz: ZoneInfo,
     p0_fresh = sum(1 for c in grid for i in grid[c]["P0"] if is_new(i, since))
     # 「今日 N 条」会被读成「今天新出 N 条」，但窗口卡的是 updated_at，
     # 实测四成条目超过一周。新增和存量的行动完全不同，必须分开写。
-    lead = (f"**P0 {p0_total}**"
-            + (f"（今日新增 **{p0_fresh}**）" if p0_fresh else "（均为存量）")
-            + f" · 今日有进展 {len(items)} 条，其中新建 {fresh} 条"
+    lead = (f"**今日新增 P0 {p0_fresh}** · 存量 P0 {p0_total - p0_fresh} · "
+            f"今日有进展 {len(items)} 条（新建 {fresh}）"
             f" · [看全部]({base})")
     if keyword and keyword.lower() not in lead.lower():
         lead = f"{keyword} · {lead}"
@@ -87,34 +86,52 @@ def build_card(items: list[dict], verdicts: dict, since: datetime, tz: ZoneInfo,
         els.append({"tag": "div", "text": {"tag": "lark_md", "content":
             "<font color='grey'>⚠️ 等级为规则打分，未经 AI 评估</font>"}})
 
-    # P0 按大类分段列出。判级松紧会波动，P0 一多卡片就会超 20KB 被飞书拒收 ——
-    # 那天就一条都发不出去，所以这里必须有硬上限，不能赌「P0 应该不多」。
+    # 卡片只铺「今日新增的 P0」—— 存量 P0 是持续风险不是今天的新闻，
+    # 一起铺会把当天真正的新情况埋掉（实测 P0 里九成以上是存量）。
+    # 存量折成一行计数 + 链接，要看细节去明细页。
+    fresh_p0 = {c: [i for i in grid[c]["P0"] if is_new(i, since)]
+                for c in COMPONENT_ORDER}
+    fresh_n = sum(len(v) for v in fresh_p0.values())
     shown = 0
     for c in COMPONENT_ORDER:
-        p0 = grid[c]["P0"]
-        if not p0 or shown >= CARD_P0_CAP:
+        rows = fresh_p0[c]
+        if not rows or shown >= CARD_P0_CAP:
             continue
-        p0 = sorted(p0, key=lambda i: not is_new(i, since))
-        take = p0[:CARD_P0_CAP - shown]
+        take = rows[:CARD_P0_CAP - shown]
         shown += len(take)
         els.append({"tag": "hr"})
         els.append({"tag": "div", "text": {"tag": "lark_md", "content":
-            f"**{COMPONENT_LABELS[c]}** · P0 {len(p0)} 条"
-            + (f"（列出 {len(take)} 条）" if len(take) < len(p0) else "")}})
+            f"**{COMPONENT_LABELS[c]}** · 今日新增 P0 {len(rows)} 条"
+            + (f"（列出 {len(take)} 条）" if len(take) < len(rows) else "")}})
         for it in take:
             v = verdicts.get(key_of(it), {})
             _, st = state_of(it)
             card = card_of(it["title"])
             meta = " · ".join(x for x in (st, card) if x)
-            tag = "🆕 " if is_new(it, since) else ""
             els.append({"tag": "div", "text": {"tag": "lark_md", "content":
-                f"**{tag}{'🐞 ' if 'pull_request' not in it else ''}"
+                f"**{'🐞 ' if 'pull_request' not in it else ''}"
                 f"[{it['title']}]({it['html_url']})**\n"
                 f"<font color='grey'>{v.get('reason', '')} · {meta}</font>"}})
-    if p0_total > shown:
+    if not fresh_n:
+        els.append({"tag": "hr"})
+        els.append({"tag": "div", "text": {"tag": "lark_md",
+                    "content": "**今日无新增 P0**"}})
+    elif fresh_n > shown:
         els.append({"tag": "div", "text": {"tag": "lark_md", "content":
-            f"<font color='grey'>…还有 {p0_total - shown} 条 P0 未列出，"
+            f"<font color='grey'>…还有 {fresh_n - shown} 条今日新增 P0 未列出，"
             f"[在明细页查看]({base})</font>"}})
+
+    # 存量 P0：只给一行。它们是持续风险，该排期而不是每天重读一遍。
+    standing = p0_total - fresh_n
+    if standing:
+        per = " · ".join(
+            f"[{COMPONENT_LABELS[c]} {len(grid[c]['P0']) - len(fresh_p0[c])}]"
+            f"({base}#{c}-p0)"
+            for c in COMPONENT_ORDER
+            if len(grid[c]["P0"]) - len(fresh_p0[c]))
+        els.append({"tag": "div", "text": {"tag": "lark_md", "content":
+            f"📌 **存量 P0 {standing} 条**（往期未解决，今日有进展）\n"
+            f"<font color='grey'>{per}</font>"}})
 
     # P1 / P2 只给每个大类的条数，点进去看
     rest = []
@@ -138,7 +155,7 @@ def build_card(items: list[dict], verdicts: dict, since: datetime, tz: ZoneInfo,
     card = {"config": {"wide_screen_mode": True},
             "header": {"template": "red" if p0_total else "blue",
                        "title": {"tag": "plain_text",
-                                 "content": f"DeepSeek-V4.1 上游日报 {now:%m-%d}"}},
+                                 "content": f"上游推理进展 {now:%m-%d}"}},
             "elements": els}
 
     # 兜底：还是逼近上限就把灰色理由行剥掉，标题和链接优先保住
