@@ -61,8 +61,9 @@ li.p0 a.t{font-weight:700}
 .tags{font-size:11px;color:var(--muted);margin-left:6px;white-space:nowrap}
 .st-open{color:var(--open)} .st-draft{color:var(--draft)}
 .st-merged{color:var(--merged)} .st-closed{color:var(--closed)}
+.what{font-size:13px;color:var(--ink);margin-top:4px}
 .why{font-size:12.5px;color:var(--muted);margin-top:3px}
-.why.ai::before{content:"AI ";font-size:10px;letter-spacing:.06em;
+.why.ai::before{content:"判级 ";font-size:10px;letter-spacing:.06em;
   color:var(--accent);font-weight:600}
 .ev{font-size:11px;color:var(--muted)}
 .new{font-size:10px;font-weight:700;color:var(--p0);border:1px solid var(--p0);
@@ -130,6 +131,8 @@ def _line(it: dict, verdict: dict, tz: ZoneInfo, since=None) -> str:
                f'{html.escape(repo_of(it))} #{it["number"]} · '
                f'{html.escape(it["title"])}</a>')
     out += bits
+    if (what := verdict.get("what")):
+        out.append(f'<div class="what">{html.escape(what)}</div>')
     if (why := verdict.get("reason")):
         cls = "why ai" if verdict.get("ai") else "why"
         out.append(f'<div class="{cls}">{html.escape(why)}</div>')

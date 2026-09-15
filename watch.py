@@ -43,7 +43,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
 import criteria  # noqa: E402
 import page  # noqa: E402
-from analyze import _describe, key_of, triage  # noqa: E402
+from analyze import _describe, deep_read, key_of, triage  # noqa: E402
 from common import (COMPONENT_LABELS, COMPONENT_ORDER, card_of,  # noqa: E402
                     collect, component_of, filter_effective, is_new,
                     keep_issue, state_of)
@@ -108,10 +108,12 @@ def build_card(items: list[dict], verdicts: dict, since: datetime, tz: ZoneInfo,
             _, st = state_of(it)
             card = card_of(it["title"])
             meta = " · ".join(x for x in (st, card) if x)
+            what = v.get("what")
             els.append({"tag": "div", "text": {"tag": "lark_md", "content":
                 f"**{'🐞 ' if 'pull_request' not in it else ''}"
                 f"[{it['title']}]({it['html_url']})**\n"
-                f"<font color='grey'>{v.get('reason', '')} · {meta}</font>"}})
+                + (f"{what}\n" if what else "")
+                + f"<font color='grey'>{v.get('reason', '')} · {meta}</font>"}})
     if not fresh_n:
         els.append({"tag": "hr"})
         els.append({"tag": "div", "text": {"tag": "lark_md",
@@ -212,6 +214,9 @@ def main() -> None:
     if items and os.environ.get("NO_AI") != "1":
         verdicts = triage(items)
         ai_on = any(v.get("ai") for v in verdicts.values())
+        if ai_on and os.environ.get("NO_DEEP") != "1":
+            # 粗筛只喂 400 字符正文，99% 被截断；P0/P1 候选再读一遍全文
+            verdicts = deep_read(items, verdicts, since)
     elif items:
         from analyze import _fallback
         verdicts = _fallback(items)
@@ -221,7 +226,8 @@ def main() -> None:
         lv[v["level"]] += 1
     print(f"triage: P0 {lv['P0']} / P1 {lv['P1']} / P2 {lv['P2']}"
           f"  (ai={'on' if ai_on else 'off'}, model={_describe()}, "
-          f"criteria={_c['version']} [{_c['source']}])")
+          f"criteria={_c['version']} [{_c['source']}], "
+          f"精读 {sum(1 for v in verdicts.values() if v.get('deep'))} 条)")
     # 两处降级都不会让任务失败，只会让日报悄悄变成噪声 —— 在日志里喊出来
     if not ai_on:
         print("::warning::LLM_API_KEY 未配置，等级为规则打分，未经 AI 评估")

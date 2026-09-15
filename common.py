@@ -311,6 +311,12 @@ _STRIP = [
     (re.compile(r"</?[a-z][^>]*>", re.I), " "),                       # 裸 HTML
     # 只吃行首的标题符号 —— 全局替换会把正文里的 issue 引用 `#56022` 也啃成 `56022`
     (re.compile(r"^\s*#{1,6}\s*", re.M), " "),
+    # PR 模板的占位提示。提交者不填描述时会原样留在正文里，实测能白占
+    # 400 字符预算里的 130 个（vLLM #56969）。
+    (re.compile(r"PLEASE FILL IN THE PR DESCRIPTION HERE[^.]*\.", re.I), " "),
+    (re.compile(r"\(?(will be )?removed by GitHub Actions\)?", re.I), " "),
+    (re.compile(r"^\s*(essential elements|before submitting|purpose|test plan"
+                r"|test result|checklist)\s*:?\s*$", re.I | re.M), " "),
 ]
 
 # 模板小标题被上面剥掉标题符号后会剩下光秃秃的词，开头这几个直接丢

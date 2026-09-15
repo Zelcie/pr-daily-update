@@ -22,7 +22,8 @@ import urllib.error
 import urllib.request
 
 import criteria
-from common import is_severe, kind_of, repo_of, summarize
+from common import (is_new, is_severe, kind_of, repo_of, state_of,
+                    summarize)
 
 # 两个 backend：
 #   anthropic —— 官方 SDK，凭据来自 ANTHROPIC_API_KEY 或 `ant auth login` 的
@@ -50,7 +51,8 @@ SCHEMA = {
         "type": "object",
         "properties": {"id": {"type": "string"},
                        "level": {"type": "string", "enum": ["P0", "P1", "P2"]},
-                       "reason": {"type": "string"}},
+                       "reason": {"type": "string"},
+                       "what": {"type": "string"}},
         "required": ["id", "level", "reason"],
         "additionalProperties": False}}},
     "required": ["items"],
@@ -81,6 +83,98 @@ _TAIL = """
 def system_prompt(token=None):
     """运行时拼 —— 中间那段标准可能来自 issue 正文，不是编译期常量。"""
     return _PREFACE + criteria.active(token)["text"] + _TAIL
+
+
+# 二次精读：粗筛判成 P0/P1 的再读一遍全文。
+# 上游的 PR 正文中位数 4269 字符、p90 7610，而粗筛只喂 400 字符 —— 99% 被截断，
+# 模型基本只能看标题推理。实测 vLLM #56969 那种 15000 字的正文，粗筛看到的
+# 只有模板占位符加一句标题重复。
+DEEP_BODY = 6000
+DEEP_BATCH = 8
+# P0+P1 常占八成以上（实测 304 条里 256 条），全精读等于全量重跑，
+# 所以设上限，按 P0 优先、其次今日新增的 P1 取。
+DEEP_MAX = int(os.environ.get("DEEP_MAX", "80"))
+
+DEEP_SYSTEM_TAIL = """
+
+这一轮你能看到完整正文和标签，不再只有标题。请重新判断，并额外写一句
+「这个 PR / issue 做了什么」。
+
+只输出 JSON，不要解释、不要代码围栏：
+{"items":[{"id":"原样抄回","what":"一句中文，说清它改了什么/报告了什么，要具体到机制或数字，不要复述标题","level":"P0|P1|P2","reason":"一句中文，说清后果是什么"}]}
+输入里每一条都必须出现一次。上一轮的等级只是参考，读完全文该改就改。"""
+
+
+def deep_system(token: str | None = None) -> str:
+    return _PREFACE + criteria.active(token)["text"] + DEEP_SYSTEM_TAIL
+
+
+def _deep_payload(items: list[dict], verdicts: dict) -> list[dict]:
+    out = []
+    for it in items:
+        out.append({
+            "id": key_of(it),
+            "type": "issue" if "pull_request" not in it else "pr",
+            "title": it["title"],
+            "state": state_of(it)[1],
+            "labels": [l["name"] for l in (it.get("labels") or [])][:8],
+            "body": summarize(it.get("body"), DEEP_BODY),
+            "first_pass": verdicts.get(key_of(it), {}).get("level", ""),
+        })
+    return out
+
+
+def deep_read(items: list[dict], verdicts: dict[str, dict],
+              since=None) -> dict[str, dict]:
+    """对 P0/P1 候选再读一遍全文，产出 what 并允许改判。
+
+    正文已经在搜索结果里，所以这一步**不需要额外的 GitHub 请求** —— 只花
+    模型 token。
+    """
+    cands = [it for it in items
+             if verdicts.get(key_of(it), {}).get("level") in ("P0", "P1")]
+    if not cands:
+        return verdicts
+
+    def rank(it):
+        lvl = verdicts[key_of(it)]["level"]
+        fresh = is_new(it, since) if since else False
+        return (0 if lvl == "P0" else 1, 0 if fresh else 1)
+
+    cands = sorted(cands, key=rank)[:DEEP_MAX]
+    print(f"deep: 精读 {len(cands)} 条（候选 "
+          f"{sum(1 for i in items if verdicts.get(key_of(i), {}).get('level') in ('P0', 'P1'))} 条）",
+          file=sys.stderr)
+
+    anthropic_mode = PROVIDER == "anthropic"
+    api_key = os.environ.get("LLM_API_KEY")
+    done = 0
+    for i in range(0, len(cands), DEEP_BATCH):
+        chunk = cands[i:i + DEEP_BATCH]
+        try:
+            raw = (_call_anthropic(_deep_payload(chunk, verdicts),
+                                   system=deep_system())
+                   if anthropic_mode else
+                   _call(_deep_payload(chunk, verdicts), api_key,
+                         system=deep_system()))
+            for row in raw.get("items", []):
+                k = row.get("id")
+                if k not in verdicts:
+                    continue
+                lvl = str(row.get("level", "")).upper()
+                if lvl in ("P0", "P1", "P2"):
+                    verdicts[k]["level"] = lvl
+                if row.get("reason"):
+                    verdicts[k]["reason"] = str(row["reason"]).strip()
+                if row.get("what"):
+                    verdicts[k]["what"] = str(row["what"]).strip()
+                verdicts[k]["deep"] = True
+                done += 1
+        except Exception as e:
+            print(f"deep: 第 {i // DEEP_BATCH + 1} 批失败（{e}），保留粗筛结果",
+                  file=sys.stderr)
+    print(f"deep: {done} 条已精读", file=sys.stderr)
+    return verdicts
 
 
 def key_of(item: dict) -> str:
@@ -120,11 +214,12 @@ def _extract_json(text: str) -> dict:
     raise ValueError("unbalanced JSON in response")
 
 
-def _post(payload: list[dict], api_key: str, fmt: dict, timeout: int) -> dict:
+def _post(payload: list[dict], api_key: str, fmt: dict, timeout: int,
+          system: str | None = None) -> dict:
     body = json.dumps({
         "model": MODEL,
         "messages": [
-            {"role": "system", "content": system_prompt()},
+            {"role": "system", "content": system or system_prompt()},
             {"role": "user", "content":
              f"给下面 {len(payload)} 条评级：\n"
              + json.dumps(payload, ensure_ascii=False)},
@@ -146,19 +241,21 @@ _STRICT = {"type": "json_schema",
 _LOOSE = {"type": "json_object"}
 
 
-def _call(payload: list[dict], api_key: str, timeout: int = 240) -> dict:
+def _call(payload: list[dict], api_key: str, timeout: int = 240,
+          system: str | None = None) -> dict:
     try:
-        return _post(payload, api_key, _STRICT, timeout)
+        return _post(payload, api_key, _STRICT, timeout, system)
     except urllib.error.HTTPError as e:
         if e.code != 400:
             raise
         # 模型不支持严格 schema，退回 json_object
         print(f"analyze: {MODEL} 拒绝 json_schema，退回 json_object",
               file=sys.stderr)
-        return _post(payload, api_key, _LOOSE, timeout)
+        return _post(payload, api_key, _LOOSE, timeout, system)
 
 
-def _call_anthropic(payload: list[dict], timeout: int = 600) -> dict:
+def _call_anthropic(payload: list[dict], timeout: int = 600,
+                    system: str | None = None) -> dict:
     """官方 SDK。凭据由 SDK 自己解析：ANTHROPIC_API_KEY，或 `ant auth login`
     存在 ~/.config/anthropic/ 的 profile —— 所以裸 Anthropic() 就够了。"""
     import anthropic
@@ -167,7 +264,7 @@ def _call_anthropic(payload: list[dict], timeout: int = 600) -> dict:
     with client.messages.stream(
         model=ANTHROPIC_MODEL,
         max_tokens=16000,
-        system=system_prompt(),
+        system=system or system_prompt(),
         messages=[{"role": "user", "content":
                    f"给下面 {len(payload)} 条评级：\n"
                    + json.dumps(payload, ensure_ascii=False)}],
