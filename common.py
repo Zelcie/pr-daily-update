@@ -544,6 +544,24 @@ def is_new(item: dict, since: datetime) -> bool:
     return created >= since
 
 
+def merged_in_window(item: dict, since: datetime) -> bool:
+    """这一条是不是窗口内合进上游的。
+
+    「上游刚合进一个正确性修复」和「今天新开了个 PR」同样该立刻知道 ——
+    甚至更该，因为它已经进了 main，下次 bump 版本就会跟过来。
+
+    看 merged_at 而不是 _events 里的 merged：没有 GITHUB_TOKEN 时 timeline
+    整个取不到，_events 会是空的，而 merged_at 在搜索结果里就有。
+    """
+    ts = (item.get("pull_request") or {}).get("merged_at")
+    if not ts:
+        return False
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")) >= since
+    except ValueError:
+        return False
+
+
 def filter_effective(items: list[dict], since: datetime,
                      token: str | None, workers: int = 8) -> list[dict]:
     """只留窗口内**新建的**或**有实质进展的**。

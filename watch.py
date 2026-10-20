@@ -49,7 +49,8 @@ import page  # noqa: E402
 from analyze import _describe, deep_read, key_of, triage  # noqa: E402
 from common import (COMPONENT_LABELS, COMPONENT_ORDER, card_of,  # noqa: E402
                     collect, component_of, filter_effective, is_new,
-                    is_own_kv, keep_issue, repo_of, state_of)
+                    is_own_kv, keep_issue, merged_in_window, repo_of,
+                    state_of)
 
 DEFAULT_PAGE = "https://zelcie.github.io/pr-daily-update/"
 CARD_P0_CAP = 20      # 单次卡片最多列这么多 P0，其余给个跳转
@@ -76,10 +77,14 @@ def build_card(items: list[dict], verdicts: dict, since: datetime, tz: ZoneInfo,
     base = page_url.rstrip("/") + "/"
 
     fresh = sum(1 for i in items if is_new(i, since))
-    p0_fresh = sum(1 for c in grid for i in grid[c]["P0"] if is_new(i, since))
     # 「今日 N 条」会被读成「今天新出 N 条」，但窗口卡的是 updated_at，
     # 实测四成条目超过一周。新增和存量的行动完全不同，必须分开写。
-    lead = (f"**今日新增 P0 {p0_fresh}** · 存量 P0 {p0_total - p0_fresh} · "
+    # 合并的单独计一格，且和新增互斥（同一天开又合的只算新增），三个数能加起来。
+    p0_fresh = sum(1 for c in grid for i in grid[c]["P0"] if is_new(i, since))
+    p0_merged = sum(1 for c in grid for i in grid[c]["P0"]
+                    if merged_in_window(i, since) and not is_new(i, since))
+    lead = (f"**今日新增 P0 {p0_fresh} · 今日合并 P0 {p0_merged}** · "
+            f"存量 P0 {p0_total - p0_fresh - p0_merged} · "
             f"今日有进展 {len(items)} 条（新建 {fresh}）"
             f" · [看全部]({base})")
     if keyword and keyword.lower() not in lead.lower():
@@ -89,22 +94,29 @@ def build_card(items: list[dict], verdicts: dict, since: datetime, tz: ZoneInfo,
         els.append({"tag": "div", "text": {"tag": "lark_md", "content":
             "<font color='grey'>⚠️ 等级为规则打分，未经 AI 评估</font>"}})
 
-    # 卡片只铺「今日新增的 P0」—— 存量 P0 是持续风险不是今天的新闻，
-    # 一起铺会把当天真正的新情况埋掉（实测 P0 里九成以上是存量）。
-    # 存量折成一行计数 + 链接，要看细节去明细页。
-    fresh_p0 = {c: [i for i in grid[c]["P0"] if is_new(i, since)]
-                for c in COMPONENT_ORDER}
-    fresh_n = sum(len(v) for v in fresh_p0.values())
+    # 卡片铺「今日新增」和「今日合并」的 P0，别的只给数 —— 存量 P0 是持续
+    # 风险不是今天的新闻，一起铺会把当天真正的新情况埋掉（实测 P0 里九成
+    # 以上是存量）。存量折成一行计数 + 链接，要看细节去明细页。
+    #
+    # 合并的必须铺开：它在页面上没有「今日新增」标记，又被新增的挤到后面，
+    # 只给数的话等于看不见 —— DeepGEMM #478（mega_mhc 在 graph replay 下
+    # 算错）就是这么被漏掉的。
+    # 类内新增在前、合并在后，和页面的顺序一致。
+    lead_p0 = {c: [i for i in grid[c]["P0"] if is_new(i, since)]
+                  + [i for i in grid[c]["P0"]
+                     if merged_in_window(i, since) and not is_new(i, since)]
+               for c in COMPONENT_ORDER}
+    lead_n = sum(len(v) for v in lead_p0.values())
     shown = 0
     for c in COMPONENT_ORDER:
-        rows = fresh_p0[c]
+        rows = lead_p0[c]
         if not rows or shown >= CARD_P0_CAP:
             continue
         take = rows[:CARD_P0_CAP - shown]
         shown += len(take)
         els.append({"tag": "hr"})
         els.append({"tag": "div", "text": {"tag": "lark_md", "content":
-            f"**{COMPONENT_LABELS[c]}** · 今日新增 P0 {len(rows)} 条"
+            f"**{COMPONENT_LABELS[c]}** · 今日新增/合并 P0 {len(rows)} 条"
             + (f"（列出 {len(take)} 条）" if len(take) < len(rows) else "")}})
         for it in take:
             v = verdicts.get(key_of(it), {})
@@ -118,23 +130,23 @@ def build_card(items: list[dict], verdicts: dict, since: datetime, tz: ZoneInfo,
                 f"[{it['title']}]({it['html_url']})**\n"
                 + (f"{what}\n" if what else "")
                 + f"<font color='grey'>{meta}</font>"}})
-    if not fresh_n:
+    if not lead_n:
         els.append({"tag": "hr"})
         els.append({"tag": "div", "text": {"tag": "lark_md",
-                    "content": "**今日无新增 P0**"}})
-    elif fresh_n > shown:
+                    "content": "**今日无新增或合并的 P0**"}})
+    elif lead_n > shown:
         els.append({"tag": "div", "text": {"tag": "lark_md", "content":
-            f"<font color='grey'>…还有 {fresh_n - shown} 条今日新增 P0 未列出，"
-            f"[在明细页查看]({base})</font>"}})
+            f"<font color='grey'>…还有 {lead_n - shown} 条今日新增/合并 P0 "
+            f"未列出，[在明细页查看]({base})</font>"}})
 
     # 存量 P0：只给一行。它们是持续风险，该排期而不是每天重读一遍。
-    standing = p0_total - fresh_n
+    standing = p0_total - lead_n
     if standing:
         per = " · ".join(
-            f"[{COMPONENT_LABELS[c]} {len(grid[c]['P0']) - len(fresh_p0[c])}]"
+            f"[{COMPONENT_LABELS[c]} {len(grid[c]['P0']) - len(lead_p0[c])}]"
             f"({base}#{c}-p0)"
             for c in COMPONENT_ORDER
-            if len(grid[c]["P0"]) - len(fresh_p0[c]))
+            if len(grid[c]["P0"]) - len(lead_p0[c]))
         els.append({"tag": "div", "text": {"tag": "lark_md", "content":
             f"📌 **存量 P0 {standing} 条**（往期未解决，今日有进展）\n"
             f"<font color='grey'>{per}</font>"}})
