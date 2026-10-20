@@ -359,32 +359,8 @@ def keep_issue(item: dict) -> bool:
     return bool(ISSUE_DEFECT.match(item["title"]))
 
 
-def issue_score(item: dict) -> int:
-    """高危词值 3 分，再叠热度。排序用，不是绝对严重度。"""
-    return (3 * bool(ISSUE_SEVERE.search(item["title"]))
-            + item.get("comments", 0)
-            + 2 * item.get("reactions", {}).get("total_count", 0))
-
-
 def is_severe(item: dict) -> bool:
     return bool(ISSUE_SEVERE.search(item["title"]))
-
-
-def collect_issues(since: datetime, token: str | None) -> list[dict]:
-    """筛过的未解决缺陷类 issue，按分数降序。
-
-    窗口比 PR 长：一个还开着的缺陷，三天前报的和今天报的一样会咬人，
-    不该因为今天没人评论就从风险板上消失。
-    """
-    stamp = since.strftime("%Y-%m-%dT%H:%M:%SZ")
-    merged: dict[int, dict] = {}
-    for i, term in enumerate(SEARCH_TERMS):
-        if i and not token:
-            time.sleep(7)
-        for item in _search(term, stamp, token, kind="issue"):
-            if keep_issue(item):
-                merged[item["id"]] = item
-    return sorted(merged.values(), key=issue_score, reverse=True)
 
 
 def state_of(item: dict) -> tuple[str, str]:

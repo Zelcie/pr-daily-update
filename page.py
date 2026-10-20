@@ -19,7 +19,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from common import (COMPONENT_LABELS, COMPONENT_ORDER, card_of, component_of,
-                    is_new, repo_of, state_of, summarize)
+                    is_new, repo_of, state_of)
 
 LEVELS = [lvl for lvl, _o, _g in criteria.LEVELS]
 LEVEL_DESC = {lvl: one for lvl, one, _g in criteria.LEVELS}
