@@ -49,7 +49,7 @@ import page  # noqa: E402
 from analyze import _describe, deep_read, key_of, triage  # noqa: E402
 from common import (COMPONENT_LABELS, COMPONENT_ORDER, card_of,  # noqa: E402
                     collect, component_of, filter_effective, is_new,
-                    keep_issue, repo_of, state_of)
+                    is_own_kv, keep_issue, repo_of, state_of)
 
 DEFAULT_PAGE = "https://zelcie.github.io/pr-daily-update/"
 CARD_P0_CAP = 20      # 单次卡片最多列这么多 P0，其余给个跳转
@@ -206,10 +206,14 @@ def main() -> None:
     # issue 用同一个窗口：这里要的是「今天动了什么」，不是长期风险板
     issues = [i for i in collect(since, token, kind="issue") if keep_issue(i)]
     raw = prs + issues
+    # KV 存储层我们自管，先丢掉再去查 timeline —— 省掉一批请求
+    own_kv = [i for i in raw if is_own_kv(i["title"])]
+    raw = [i for i in raw if not is_own_kv(i["title"])]
     items = filter_effective(raw, since, token)
     filtered = bool(token)
-    print(f"{len(raw)} touched → {len(items)} with real progress"
-          f" ({len(prs)} PRs / {len(issues)} issues before filter)"
+    print(f"{len(raw) + len(own_kv)} touched → {len(items)} with real progress"
+          f" ({len(prs)} PRs / {len(issues)} issues before filter"
+          f"，自管 KV 存储层丢掉 {len(own_kv)} 条)"
           + ("" if filtered else "  [未过滤：无 GITHUB_TOKEN]"))
 
     ai_on = False

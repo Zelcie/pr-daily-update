@@ -88,10 +88,6 @@ COMPONENTS: list[tuple[str, str, re.Pattern]] = [
     ("spec", "🚀 投机解码", _w(
         "dspark", "dflash", "spec", "speculative", "mtp", "eagle",
         "draft", "drafts", "drafter", "drafters", "d2t", "domino")),
-    ("kv", "💾 KV Cache", _w(
-        "hisparse", "hicache", "unified[ _-]?cache", "kv[ _-]?cache",
-        "block[ _-]?pool", "kv[ _-]?connector", "page", "paged", "radix",
-        "prefix[ _-]?cache", "kv[ _-]?writer", "unified_kv", "kv")),
     # 排在 mla / moe 前面：mega_mhc 不该因为 `mhc` 落进 MLA，MegaMoE 和
     # grouped GEMM 也不该落进 MoE —— 它们是 kernel 层的东西，混进上游
     # 框架层的大类里就看不出是哪一层在动了。
@@ -131,6 +127,36 @@ COMPONENTS: list[tuple[str, str, re.Pattern]] = [
         "definitions", "backend")),
 ]
 COMPONENT_FALLBACK = ("misc", "📦 其他")
+
+# ---------------------------------------------------------------- 自管组件
+
+# KV cache 的存储层我们自己维护，上游怎么改都和我们无关 —— 整条丢掉，不进
+# 页面也不进卡片。原来的「💾 KV Cache」大类一并删了。
+#
+# 不能按「标题里有 KV」来丢：这个词同时压在稀疏注意力路径上。实测原 KV 类
+# 55 条里有 31 条落在 MLA 路径，那些是要看的。
+#
+# 主机侧 KV 存储层：hicache / unified_cache / 各种外部存储后端 / 分片与去重。
+# 无条件丢，不管标题里有没有 MLA —— `hicache: Deduplicate MLA/DSA host KV`
+# 这种只是顺带提一句模型，干的还是主机侧存储的活。
+#
+# 刻意不含 KV Connector / NIXL：那是 PD 分离的传输层，不是 cache 本身，
+# 而 PD 是我们的主力部署形态，那儿的缺陷照样会咬到线上。
+#
+# 也刻意不含 page / paged / kv_cache 这些泛词：`Stop CUDA graphs from writing
+# into freed FlashMLA page-split buffers`、`Page-aware move_kv_cache for the
+# DSA indexer cache` 都带这些词，但讲的是稀疏注意力路径，是要看的。
+KV_STORAGE = _w(
+    "hicache", "hiradix", "unified[ _-]?cache", "unified[ _-]?kv",
+    "kv[ _-]?writer", "block[ _-]?pool", "radix", "prefix[ _-]?cache",
+    "kv[ _-]?offload", "kvshard", "host[ _-]?dedup",
+    "seaweedfs", "tair", "mooncake", "lmcache")
+
+
+def is_own_kv(title: str) -> bool:
+    """纯属我们自管的 KV 存储层，抓到也不看。"""
+    return bool(KV_STORAGE.search(title))
+
 
 # 卡型只做标注，不参与优先级 —— 不同卡型是并行推进的，SM80 上起不来和 SM100 上
 # 起不来同样是缺陷，不该因为「我们主力不是那张卡」就降级。
