@@ -131,9 +131,12 @@ def _line(it: dict, verdict: dict, tz: ZoneInfo, since=None) -> str:
                f'{html.escape(repo_of(it))} #{it["number"]} · '
                f'{html.escape(it["title"])}</a>')
     out += bits
+    # 精读过的只给「做了什么」—— 判级理由基本是它的同义反复。没精读的
+    # （P2，以及降级成规则打分时的全部条目）没有 what，退回理由，不然
+    # 整条就只剩一个标题。
     if (what := verdict.get("what")):
         out.append(f'<div class="what">{html.escape(what)}</div>')
-    if (why := verdict.get("reason")):
+    elif (why := verdict.get("reason")):
         cls = "why ai" if verdict.get("ai") else "why"
         out.append(f'<div class="{cls}">{html.escape(why)}</div>')
     out.append("</li>")

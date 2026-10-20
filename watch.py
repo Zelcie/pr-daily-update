@@ -5,7 +5,7 @@
 （见 common.FULL_REPOS）。
 
 产出两样：
-  1. site/index.html —— 按 P0/P1/P2 分组的朴素链接列表，每条带 AI 评级理由
+  1. site/index.html —— 按 P0/P1/P2 分组的朴素链接列表，每条带 AI 写的一句「做了什么」
   2. 一张飞书卡片 —— P0 全列（加粗），P1 列标题，P2 只给数
 
 三道处理：抓 → 只留窗口内有实质进展的 → 交给 Claude 评 P0/P1/P2。
@@ -54,7 +54,7 @@ from common import (COMPONENT_LABELS, COMPONENT_ORDER, card_of,  # noqa: E402
 DEFAULT_PAGE = "https://zelcie.github.io/pr-daily-update/"
 CARD_P0_CAP = 20      # 单次卡片最多列这么多 P0，其余给个跳转
 CARD_LIMIT = 20 * 1024
-CARD_SOFT = 18 * 1024  # 逼近上限就先砍理由，别等 post() 里硬退出
+CARD_SOFT = 18 * 1024  # 逼近上限就先砍灰色元信息，别等 post() 里硬退出
 
 
 def _get(name: str) -> str:
@@ -111,12 +111,13 @@ def build_card(items: list[dict], verdicts: dict, since: datetime, tz: ZoneInfo,
             _, st = state_of(it)
             card = card_of(it["title"])
             meta = " · ".join(x for x in (st, card) if x)
-            what = v.get("what")
+            # 有「做了什么」就不再附判级理由，两者基本同义反复
+            what = v.get("what") or v.get("reason", "")
             els.append({"tag": "div", "text": {"tag": "lark_md", "content":
                 f"**{'🐞 ' if 'pull_request' not in it else ''}"
                 f"[{it['title']}]({it['html_url']})**\n"
                 + (f"{what}\n" if what else "")
-                + f"<font color='grey'>{v.get('reason', '')} · {meta}</font>"}})
+                + f"<font color='grey'>{meta}</font>"}})
     if not fresh_n:
         els.append({"tag": "hr"})
         els.append({"tag": "div", "text": {"tag": "lark_md",
@@ -163,13 +164,13 @@ def build_card(items: list[dict], verdicts: dict, since: datetime, tz: ZoneInfo,
                                  "content": f"上游推理进展 {now:%m-%d}"}},
             "elements": els}
 
-    # 兜底：还是逼近上限就把灰色理由行剥掉，标题和链接优先保住
+    # 兜底：还是逼近上限就把灰色元信息行剥掉，标题和「做了什么」优先保住
     if len(json.dumps(card, ensure_ascii=False).encode()) > CARD_SOFT:
         for e in card["elements"]:
             t = (e.get("text") or {}).get("content", "")
             if "<font color='grey'>" in t and t.startswith("**"):
                 e["text"]["content"] = t.split("\n<font color='grey'>")[0]
-        print("card: 逼近 20KB，已剥掉理由行", file=sys.stderr)
+        print("card: 逼近 20KB，已剥掉灰色元信息行", file=sys.stderr)
     return card
 
 
