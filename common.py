@@ -12,6 +12,25 @@ from datetime import datetime
 
 REPOS = ["vllm-project/vllm", "sgl-project/sglang"]
 
+# 整仓全量跟的仓库，不过关键词。值是归类用的大类 —— 一个库里每条都是同一类
+# 东西，不用拿标题猜。
+#
+# 为什么要单独抓：这些库的修复不会出现在 vLLM/SGLang 的 PR 标题里，上游只是
+# bump 一下版本号，所以不抓就是彻底的盲区。
+#
+# 为什么不过关键词：
+#   1. 量小。近 30 天 DeepGEMM 29 PR / 6 issue、FlashMLA 14 / 0、DeepEP
+#      45 / 25，全收也淹不了页面。
+#   2. 关键词对它们没用。正确性修复的标题里一个 SEARCH_TERMS 都不命中，
+#      `Fix mega_mhc split barriers under CUDA graph replay` 就是一例
+#      （`cudagraph` 匹配不上中间带空格的 `CUDA graph`）。
+FULL_REPOS = {
+    "deepseek-ai/DeepGEMM": "gemm",
+    "deepseek-ai/FlashMLA": "mla",
+    "deepseek-ai/DeepEP": "moe",
+}
+FULL_REPO_COMPONENT = {r.rsplit("/", 1)[-1]: c for r, c in FULL_REPOS.items()}
+
 # GitHub 的 issue search 把多个词按 AND 处理，不支持 OR，所以每个词单独搜一次再合并。
 # 只搜标题：实测 `deepseek in:title,body` 七天回来 717 条，绝大多数是 PR 模板里
 # 顺口提一句 deepseek，还会把 `[HiCache] ... NAME_MAX` 误判成 V4.1 命中；
@@ -30,8 +49,9 @@ SEARCH_TERMS = [
     "mla", "indexer", "deepep", "eplb", "cudagraph", "fp4",
 ]
 
-# 每轮至少 len(SEARCH_TERMS) × 2（PR + issue）次 search 请求，超过一页的查询
-# 还会再加。认证后 search 的限额是 30 次/分钟，不节流会间歇吃 403。
+# 每轮至少 (len(SEARCH_TERMS) + len(FULL_REPOS)) × 2（PR + issue）次 search
+# 请求，超过一页的查询还会再加。认证后 search 的限额是 30 次/分钟，不节流会
+# 间歇吃 403。
 SEARCH_GAP_TOKEN = 2.5
 SEARCH_GAP_ANON = 7.0     # 未认证只有 10 次/分钟
 
@@ -72,6 +92,12 @@ COMPONENTS: list[tuple[str, str, re.Pattern]] = [
         "hisparse", "hicache", "unified[ _-]?cache", "kv[ _-]?cache",
         "block[ _-]?pool", "kv[ _-]?connector", "page", "paged", "radix",
         "prefix[ _-]?cache", "kv[ _-]?writer", "unified_kv", "kv")),
+    # 排在 mla / moe 前面：mega_mhc 不该因为 `mhc` 落进 MLA，MegaMoE 和
+    # grouped GEMM 也不该落进 MoE —— 它们是 kernel 层的东西，混进上游
+    # 框架层的大类里就看不出是哪一层在动了。
+    ("gemm", "🧮 GEMM / DeepGEMM", _w(
+        "deepgemm", "deep[ _-]?gemm", "gemm", "mega[ _-]?mhc", "mega[ _-]?moe",
+        "einsum", "cublas", "cublaslt", "tcgen05", "tmem")),
     ("mla", "🎯 稀疏注意力 / MLA", _w(
         "mla", "sparse[ _-]?attention", "sparse", "indexer", "mqa[ _-]?logits",
         "dsa", "mhc", "swa", "yarn", "nope",
@@ -83,8 +109,9 @@ COMPONENTS: list[tuple[str, str, re.Pattern]] = [
         r"ep\d*", r"dp\d*", r"pp\d*", r"dcp\d*", r"pcp\d*", r"edp\d*", "dpa",
         "expert[ _-]?parallel", "data[ _-]?parallel", "pipeline[ _-]?parallel",
         "disaggregation", "disaggregated", "disagg", "pdmux", r"\d+p\d+d", "pd")),
+    # `gemm` 挪去上面的 gemm 大类了，留在这儿会是死规则（第一个命中的赢）
     ("moe", "🧠 MoE / 路由", _w(
-        "moe", "expert", "experts", "deepep", "router", "routing", "gemm")),
+        "moe", "expert", "experts", "deepep", "router", "routing")),
     ("quant", "🔢 量化", _w(
         "fp8", "fp4", "nvfp4", "mxfp4", "gptq", "autoround", "quantized",
         "quantization", "quantize", "wna16", "int8", "awq")),
@@ -121,7 +148,12 @@ def card_of(title: str) -> str:
     return " / ".join(hits[:2])
 
 
-def component_of(title: str) -> str:
+def component_of(title: str, repo: str = "") -> str:
+    # 全量仓库按仓库归类，不看标题：`fix: reject non-positive block size
+    # multiples` 这种标题一个词都不命中，按标题分会掉进兜底桶，和「其他」
+    # 里的杂项混在一起。
+    if repo in FULL_REPO_COMPONENT:
+        return FULL_REPO_COMPONENT[repo]
     for key, _label, pat in COMPONENTS:
         if pat.search(title):
             return key
@@ -199,6 +231,12 @@ def _search(term: str, since: str, token: str | None,
     return _query(q, token, term)
 
 
+def _search_repo(repo: str, since: str, token: str | None,
+                 kind: str = "pr") -> list[dict]:
+    """整仓全量，不加关键词。窗口内动过的全要，筛的事交给判级。"""
+    return _query(f"repo:{repo} is:{kind} updated:>={since}", token, repo)
+
+
 def _query(q: str, token: str | None, label: str) -> list[dict]:
     """翻页取完。
 
@@ -250,11 +288,16 @@ def collect(since: datetime, token: str | None,
             kind: str = "pr") -> list[dict]:
     """每个关键词单独搜一次再按 id 合并去重。"""
     stamp = since.strftime("%Y-%m-%dT%H:%M:%SZ")
+    gap = SEARCH_GAP_TOKEN if token else SEARCH_GAP_ANON
     merged: dict[int, dict] = {}
     for i, term in enumerate(SEARCH_TERMS):
         if i:
-            time.sleep(SEARCH_GAP_TOKEN if token else SEARCH_GAP_ANON)
+            time.sleep(gap)
         for item in _search(term, stamp, token, kind=kind):
+            merged[item["id"]] = item
+    for repo in FULL_REPOS:
+        time.sleep(gap)
+        for item in _search_repo(repo, stamp, token, kind=kind):
             merged[item["id"]] = item
     return sorted(merged.values(), key=lambda x: x["updated_at"], reverse=True)
 
@@ -280,6 +323,13 @@ def keep_issue(item: dict) -> bool:
         return False
     if {l["name"].lower() for l in item.get("labels", [])} & ISSUE_DEAD:
         return False
+    if item["repository_url"].rsplit("/", 1)[-1] in FULL_REPO_COMPONENT:
+        # 前缀这条只对 vLLM/SGLang 成立 —— 它们的 issue 模板强制打前缀。
+        # 全量仓库不强制（DeepGEMM 的 `Update CUTLASS to 4.8.0 for SM107`
+        # 就没有），只认前缀会把没打前缀的缺陷整条漏掉，所以前缀或高危词
+        # 任一命中即留。
+        return bool(ISSUE_DEFECT.match(item["title"])
+                    or ISSUE_SEVERE.search(item["title"]))
     return bool(ISSUE_DEFECT.match(item["title"]))
 
 

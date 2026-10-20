@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""每天把 vLLM / SGLang 上跟我们推理路径有关的进展推到飞书群。
+"""每天把上游跟我们推理路径有关的进展推到飞书群。
+
+盯两类仓库：vLLM / SGLang 过关键词；DeepGEMM / FlashMLA / DeepEP 整仓全量
+（见 common.FULL_REPOS）。
 
 产出两样：
   1. site/index.html —— 按 P0/P1/P2 分组的朴素链接列表，每条带 AI 评级理由
@@ -46,7 +49,7 @@ import page  # noqa: E402
 from analyze import _describe, deep_read, key_of, triage  # noqa: E402
 from common import (COMPONENT_LABELS, COMPONENT_ORDER, card_of,  # noqa: E402
                     collect, component_of, filter_effective, is_new,
-                    keep_issue, state_of)
+                    keep_issue, repo_of, state_of)
 
 DEFAULT_PAGE = "https://zelcie.github.io/pr-daily-update/"
 CARD_P0_CAP = 20      # 单次卡片最多列这么多 P0，其余给个跳转
@@ -67,7 +70,7 @@ def build_card(items: list[dict], verdicts: dict, since: datetime, tz: ZoneInfo,
     grid: dict[str, dict[str, list[dict]]] = defaultdict(lambda: defaultdict(list))
     for it in items:
         lvl = verdicts.get(key_of(it), {}).get("level", "P2")
-        grid[component_of(it["title"])][lvl].append(it)
+        grid[component_of(it["title"], repo_of(it))][lvl].append(it)
     p0_total = sum(len(grid[c]["P0"]) for c in grid)
     now = datetime.now(tz)
     base = page_url.rstrip("/") + "/"

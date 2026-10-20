@@ -114,7 +114,7 @@ def _line(it: dict, verdict: dict, tz: ZoneInfo, since=None) -> str:
     is_issue = "pull_request" not in it
     updated = datetime.fromisoformat(
         it["updated_at"].replace("Z", "+00:00")).astimezone(tz)
-    bits = [f'<span class="tags">{html.escape(COMPONENT_LABELS[component_of(it["title"])])}'
+    bits = [f'<span class="tags">{html.escape(COMPONENT_LABELS[component_of(it["title"], repo_of(it))])}'
             f' · <span class="st-{st}">{emoji} {st}</span>'
             f' · @{html.escape(it["user"]["login"])} · {updated:%m-%d %H:%M}']
     evs = [EV_LABEL.get(e, e) for e in dict.fromkeys(it.get("_events", []))]
@@ -193,7 +193,7 @@ def render(items: list[dict], verdicts: dict[str, dict], since: datetime,
     buckets: dict[str, list[dict]] = defaultdict(list)
     for it in items:
         lvl = verdicts.get(key_of(it), {}).get("level", "P2")
-        grid[component_of(it["title"])][lvl].append(it)
+        grid[component_of(it["title"], repo_of(it))][lvl].append(it)
         buckets[lvl].append(it)
 
     now = datetime.now(tz)
