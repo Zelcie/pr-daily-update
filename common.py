@@ -30,10 +30,13 @@ SEARCH_TERMS = [
     "mla", "indexer", "deepep", "eplb", "cudagraph", "fp4",
 ]
 
-# 每轮 = len(SEARCH_TERMS) × 2（PR + issue）次 search 请求。认证后 search 的
-# 限额是 30 次/分钟，14 个词正好顶到线上，不节流会间歇吃 403。
+# 每轮至少 len(SEARCH_TERMS) × 2（PR + issue）次 search 请求，超过一页的查询
+# 还会再加。认证后 search 的限额是 30 次/分钟，不节流会间歇吃 403。
 SEARCH_GAP_TOKEN = 2.5
 SEARCH_GAP_ANON = 7.0     # 未认证只有 10 次/分钟
+
+SEARCH_PER_PAGE = 100     # search 的单页上限
+SEARCH_PAGE_MAX = 10      # search 总共只给 1000 条，再翻也没有了
 
 GITHUB_SEARCH = "https://api.github.com/search/issues"
 
@@ -193,8 +196,36 @@ def _search(term: str, since: str, token: str | None,
             kind: str = "pr") -> list[dict]:
     q = " ".join([*(f"repo:{r}" for r in REPOS), f"is:{kind}",
                   f"{term} in:title", f"updated:>={since}"])
+    return _query(q, token, term)
+
+
+def _query(q: str, token: str | None, label: str) -> list[dict]:
+    """翻页取完。
+
+    以前只取第一页，超过 100 条就**静默**截断 —— 不报错、页面照常出，只是
+    少了东西。实测 25h 窗口里 `deepseek` 一个词就 91 条，离上限只差 9 条，
+    一个忙点的日子就会丢。
+    """
+    out: list[dict] = []
+    for page_no in range(1, SEARCH_PAGE_MAX + 1):
+        if page_no > 1:
+            time.sleep(SEARCH_GAP_TOKEN if token else SEARCH_GAP_ANON)
+        batch = _query_page(q, token, label, page_no)
+        out += batch
+        if len(batch) < SEARCH_PER_PAGE:
+            return out
+    # search 本身最多只给 1000 条，到这儿就是真顶到天花板了，喊一声
+    print(f"search: {label} 取满 {SEARCH_PAGE_MAX} 页（{SEARCH_PER_PAGE * SEARCH_PAGE_MAX} 条"
+          f"是 search 的硬上限），可能还有更多 —— 该缩窗口或拆关键词了",
+          file=sys.stderr)
+    return out
+
+
+def _query_page(q: str, token: str | None, label: str,
+                page_no: int) -> list[dict]:
     params = urllib.parse.urlencode(
-        {"q": q, "sort": "updated", "order": "desc", "per_page": "100"})
+        {"q": q, "sort": "updated", "order": "desc",
+         "per_page": str(SEARCH_PER_PAGE), "page": str(page_no)})
     req = urllib.request.Request(f"{GITHUB_SEARCH}?{params}")
     req.add_header("Accept", "application/vnd.github+json")
     req.add_header("User-Agent", "dsv41-watch")
@@ -209,8 +240,8 @@ def _search(term: str, since: str, token: str | None,
                 raise
             # 二级限流：退避后重来，别让一次 403 吞掉整个关键词
             wait = int(e.headers.get("Retry-After") or 0) or 20 * (attempt + 1)
-            print(f"search: {term} 被限流（{e.code}），等 {wait}s 重试",
-                  file=sys.stderr)
+            print(f"search: {label} 第 {page_no} 页被限流（{e.code}），"
+                  f"等 {wait}s 重试", file=sys.stderr)
             time.sleep(wait)
     return []
 
